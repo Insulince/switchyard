@@ -65,7 +65,7 @@ jobs:
 
       # Both the exact version and a moving :latest, so a compose file can
       # pin or track, whichever the operator prefers.
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@v6
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}
