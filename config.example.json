@@ -1,0 +1,19 @@
+{
+  "statusListen": ":7160",
+  "minDwellSeconds": 60,
+  "maxDwellSeconds": 900,
+  "pollSeconds": 2,
+  "gatewayPollSeconds": 30,
+  "dialTimeoutSeconds": 10,
+
+  "pools": [
+    { "name": "RIPTIDE",      "host": "127.0.0.1", "port": 23336, "statusPort": 7154 },
+    { "name": "RATUM Prime",  "host": "127.0.0.1", "port": 23337, "statusPort": 7155 },
+    { "name": "Lazarus Pool", "host": "127.0.0.1", "port": 23338, "statusPort": 7156 }
+  ],
+
+  "rigs": [
+    { "listen": "0.0.0.0:23401" },
+    { "listen": "0.0.0.0:23402" }
+  ]
+}

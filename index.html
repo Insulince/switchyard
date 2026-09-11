@@ -1,0 +1,3412 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Switchyard</title>
+<style>
+/* Palette and type are blockwatch's, deliberately and exactly: same tokens,
+   same system-monospace stack, same card and section-label treatment. These
+   two dashboards describe one mining stack and get opened side by side, so
+   they should read as one tool rather than two. That means NO webfonts --
+   blockwatch uses the platform's mono face for everything including headings,
+   and matching it matters more than any face I would otherwise pick. */
+:root {
+  color-scheme: dark;
+  --bg:        #0b0e12;
+  --panel:     #12161c;
+  --border:    #232a33;
+  --text:      #d7dde3;
+  --dim:       #6b7684;
+  --accent:    #d99a2b;
+  --good:      #4fc3a1;
+  --bad:       #e85d5d;
+  --gold:      #f2c14e;
+  --heartbeat: #3a4552;
+  /* Reserved, as in blockwatch, for reference marks only: the ideal tick and
+     the tolerance band drawn around it. Never a bar, never a status. */
+  --landmark:  #5ec8f5;
+  --fill:      rgba(255, 255, 255, 0.015);
+  /* Sentinel text -- "no rig this block" is a state, not a worker name. Dimmer
+     than --dim so it reads as absence rather than as a value. Red would be
+     wrong: an idle pool is the scheme working, not a fault. */
+  --sentinel:  #4a525c;
+  /* WAITING IS NOT A STATUS COLOUR, and it must not borrow one.
+     Amber is switchyard's own colour -- the proxy box, its buttons, its
+     labels -- so an amber rig card read as "switchyard is in some broken
+     in-between state" rather than "this miner has not arrived". Red is a
+     verdict and green is a result; neither is true of a thing that is simply
+     still on its way.
+     A desaturated blue-grey belongs to none of them. It is visibly not the
+     resting grey, so the card is clearly saying something, and it is visibly
+     not an alarm. The climbing counter beside it carries the urgency, which
+     is to say none. */
+  --waiting:   #7f93ad;
+}
+
+* { box-sizing: border-box; }
+/* Sticky-footer column. blockwatch reaches the same result with a hard
+   height:100dvh and internal scroll areas; switchyard's content is a single
+   flow that can outgrow the viewport, so min-height plus a growing <main> is
+   the right shape here. */
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+main { flex: 1 0 auto; padding: 1rem 1.2rem 1.1rem; display: flex; flex-direction: column; gap: 1.5rem; }
+body > * { min-width: 0; }
+
+header {
+  display: flex; align-items: center; gap: 0.75rem;
+  padding: 0.7rem 1.2rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+header h1 { font-size: 1.05rem; font-weight: 600; margin: 0; letter-spacing: 0.02em; }
+header .tag { color: var(--dim); font-size: 0.78rem; }
+.spacer { flex: 1; }
+/* Leading status dot, blockwatch's convention: presence and colour carry the
+   meaning, so the word "live" beside it was saying nothing the dot had not
+   already said. */
+.dot { width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--dim); flex-shrink: 0; transition: background .2s; }
+.dot.connected { background: var(--good); box-shadow: 0 0 6px var(--good); }
+.dot.disconnected { background: var(--bad); box-shadow: 0 0 6px var(--bad); }
+
+/* Header controls, styled after blockwatch's own diagnostic buttons:
+   deliberately plain, so they never compete with the data. */
+header button {
+  margin-left: 0.5rem; background: none;
+  border: 1px solid var(--border); border-radius: 6px;
+  color: var(--dim); font-family: inherit; font-size: 0.68rem;
+  padding: 0.25rem 0.65rem; cursor: pointer;
+  /* Uppercase, matching blockwatch. Controls read as controls when they are
+     cased differently from the data they act on, and every label on this page
+     that is chrome rather than measurement is already uppercase. */
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+header button:hover { color: var(--text); border-color: var(--heartbeat); }
+header button.armed { color: var(--good); border-color: var(--good); }
+/* Tinted red at rest, not only on hover. This one throws away every
+   measurement on the page, so it should read as deliberate to reach for even
+   before the confirmation does the actual gatekeeping. Same treatment as
+   blockwatch's. */
+/* Cyan at rest. Unlike the other two this one is where a new operator has to
+   go before the page shows anything at all, so it is the one control worth
+   drawing the eye. */
+header button.call { color: var(--landmark); border-color: var(--landmark); }
+/* Amber: this one changes the running placement immediately. Not destructive
+   enough for red, not passive enough to sit in the default grey. */
+header button.act { color: var(--accent); border-color: var(--accent); }
+header button.act:hover { color: var(--accent); border-color: var(--accent); filter: brightness(1.25); }
+header button.call:hover { color: var(--landmark); border-color: var(--landmark); filter: brightness(1.25); }
+header button.danger { color: var(--bad); border-color: var(--bad); }
+header button.danger:hover { color: var(--bad); border-color: var(--bad); filter: brightness(1.3); }
+
+/* Transient by design: it announces an event, and an event notice that stays
+   on screen stops reading as an event. */
+#blockFlash {
+  margin-left: 0.75rem; padding: 0.2rem 0.6rem;
+  border: 1px solid var(--gold); border-radius: 6px;
+  color: var(--gold); font-size: 0.72rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  opacity: 0; transform: translateY(-4px);
+  transition: opacity .45s, transform .45s;
+  pointer-events: none;
+}
+#blockFlash.show { opacity: 1; transform: none; }
+
+.label {
+  font-size: 0.72rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--dim); margin: 0 0 0.5rem;
+}
+.label .hint { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--sentinel); margin-left: 0.5rem; }
+[title] { cursor: help; }
+header button[title], .tip[title] { cursor: pointer; }
+
+/* ---- modals ----
+   One shell, used by the reset confirmation, the config editor and first-run
+   setup. A single implementation because they are the same object: a sheet
+   over a dimmed page with a title, a body and a row of actions. */
+.modal {
+  position: fixed; inset: 0; z-index: 80; display: none;
+  align-items: center; justify-content: center;
+  background: rgba(0,0,0,.68); padding: 1.5rem;
+}
+.modal.show { display: flex; }
+.sheet {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 12px 48px rgba(0,0,0,.6);
+  width: 100%; max-width: 46rem; max-height: 88vh;
+  display: flex; flex-direction: column;
+}
+.sheet.narrow { max-width: 30rem; }
+.sheet header {
+  display: block; padding: 1rem 1.2rem 0.75rem; border-bottom: 1px solid var(--border);
+  background: none; position: relative;
+}
+/* People reach for a corner X before they look for a Cancel button, so both
+   exist and both do exactly the same thing: close, discard, change nothing. */
+.xclose {
+  position: absolute; top: 0.7rem; right: 0.8rem;
+  background: none; border: 1px solid var(--bad); border-radius: 6px;
+  color: var(--bad); font-family: inherit; font-size: 0.9rem; line-height: 1;
+  width: 1.5rem; height: 1.5rem; cursor: pointer; padding: 0;
+}
+.xclose:hover { filter: brightness(1.3); }
+.sheet h2 { margin: 0; font-size: 0.95rem; font-weight: 600; letter-spacing: 0.02em; }
+.sheet h2.bad { color: var(--bad); }
+.sheet .lede { margin: 0.45rem 0 0; font-size: 0.76rem; color: var(--dim); line-height: 1.55; }
+/* The one line that distinguishes this form from a readout of the running
+   system. Amber because it is a caveat, not an error. */
+.sheet .pending {
+  margin: 0.5rem 0 0; font-size: 0.72rem; color: var(--accent);
+  border-left: 2px solid var(--accent); padding-left: 0.5rem;
+}
+.sheet .body { padding: 1rem 1.2rem; overflow-y: auto; flex: 1 1 auto; }
+.sheet .foot {
+  display: flex; gap: 0.6rem; align-items: center;
+  padding: 0.85rem 1.2rem; border-top: 1px solid var(--border);
+}
+.sheet .foot .spacer { flex: 1; }
+.sheet .msg { font-size: 0.74rem; }
+.sheet .msg.err { color: var(--bad); }
+.sheet .msg.ok { color: var(--good); }
+.btn {
+  background: none; border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); font-family: inherit; font-size: 0.7rem;
+  padding: 0.35rem 0.85rem; cursor: pointer;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+.btn:hover:not(:disabled) { border-color: var(--dim); }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn.primary { border-color: var(--good); color: var(--good); }
+.btn.bad { border-color: var(--bad); color: var(--bad); }
+.btn.tiny { font-size: 0.62rem; padding: 0.2rem 0.5rem; }
+/* The add buttons are the only forward motion in an otherwise static form, so
+   they are the one thing worth colouring. Green rather than the accent because
+   it reads as "go", and the accent is already spoken for by the help markers. */
+.btn.add { border-color: var(--good); color: var(--good); }
+.btn.add:hover:not(:disabled) { border-color: var(--good); filter: brightness(1.25); }
+
+/* ---- config forms ---- */
+.group + .group { margin-top: 1.4rem; }
+.group > h3 {
+  margin: 0 0 0.2rem; font-size: 0.68rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.09em; color: var(--dim);
+}
+.group > .note { margin: 0 0 0.7rem; font-size: 0.72rem; color: var(--sentinel); line-height: 1.5; }
+.card {
+  border: 1px solid var(--border); border-radius: 8px; background: var(--fill);
+  padding: 0.7rem 0.8rem; margin-bottom: 0.6rem;
+}
+.card .chead { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.55rem; }
+.card .chead .idx {
+  font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim);
+}
+.card .chead .spacer { flex: 1; }
+.fgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.55rem 0.8rem; }
+@media (max-width: 640px) { .fgrid { grid-template-columns: 1fr; } }
+.f { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
+.f.wide { grid-column: 1 / -1; }
+.f label {
+  font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--dim);
+  display: flex; align-items: center; gap: 0.3rem;
+}
+.f input {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 5px;
+  color: var(--text); font-family: inherit; font-size: 0.76rem;
+  padding: 0.35rem 0.5rem; min-width: 0; width: 100%; box-sizing: border-box;
+}
+.f input:focus { outline: none; border-color: var(--accent); }
+.f input.bad { border-color: var(--bad); }
+.f .inline { display: flex; gap: 0.4rem; align-items: stretch; }
+.f .inline input { flex: 1 1 auto; }
+.f .inline .btn { flex: 0 0 auto; white-space: nowrap; }
+/* A port is at most five digits. A full-width box for it looks like it is
+   waiting for something longer, and wastes the room two rigs could share. */
+.f input.narrow { width: 7rem; }
+.f.withbtn { flex-direction: column; }
+.f.withbtn input.narrow { display: inline-block; }
+.f.withbtn .btn { align-self: flex-start; margin-top: 0.35rem; }
+.addrow { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.75rem; }
+.sidehint {
+  font-size: 0.66rem; color: var(--sentinel); line-height: 1.45;
+  align-self: center; flex: 1 1 auto; min-width: 0;
+}
+/* A read-only field is a readout, and should not invite typing into it. */
+.f input.ro {
+  background: transparent; border-color: transparent; color: var(--text);
+  cursor: default; padding-left: 0;
+}
+.f input.ro:focus { outline: none; border-color: transparent; }
+.f input.bigval { font-size: 1.25rem; letter-spacing: 0.02em; padding-top: 0.1rem; padding-bottom: 0.1rem; }
+.addnote { font-size: 0.66rem; color: var(--sentinel); }
+/* Rigs are one short field each, so two fit across comfortably and a column
+   of eight becomes a block of four. */
+/* Two short ports and the name they produce, on one line. */
+/* Flex, not grid: the two ports are fixed-width and the name takes what is
+   left immediately after them. A grid track sized to the remaining space put
+   the name field at the far right of the card with its value clipped. */
+.trio { display: flex; align-items: flex-start; gap: 0.9rem; flex-wrap: wrap; }
+.trio .f:nth-child(1), .trio .f:nth-child(2) { flex: 0 0 7rem; }
+.trio .f:last-child { flex: 1 1 auto; min-width: 0; }
+/* The gateway-probe result belongs to the row, not to the port field it is
+   attached to: left in flow it stretched that field wide enough to push the
+   pool name onto a second line. */
+/* The port fields carry no captions of their own; their results go in the
+   block below, where a long line can wrap instead of widening the row. */
+.trio .hintline { display: none; }
+.results { margin-top: 0.55rem; display: flex; flex-direction: column; gap: 0.2rem; }
+.vline {
+  font-size: 0.66rem; line-height: 1.45; color: var(--sentinel);
+  white-space: normal; overflow-wrap: anywhere;
+}
+.vline:empty { display: none; }
+.vline.ok { color: var(--good); }
+.vline.err { color: var(--bad); }
+.vline b { font-weight: 400; }
+.trio .f { gap: 0.2rem; }
+.rigwrap { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.6rem; }
+@media (max-width: 760px) { .rigwrap { grid-template-columns: 1fr; } }
+.rigwrap .card { margin-bottom: 0; }
+.f .hintline { font-size: 0.66rem; color: var(--sentinel); line-height: 1.4; }
+.f .hintline.err { color: var(--bad); }
+.f .hintline.ok { color: var(--good); }
+.adv { grid-column: 1 / -1; margin-top: 0.1rem; }
+.adv summary {
+  cursor: pointer; font-size: 0.66rem; color: var(--sentinel);
+  text-transform: uppercase; letter-spacing: 0.07em; list-style: none;
+  padding: 0.2rem 0;
+}
+.adv summary::-webkit-details-marker { display: none; }
+.adv summary::before { content: "▸ "; }
+.adv[open] summary::before { content: "▾ "; }
+.adv summary:hover { color: var(--dim); }
+.adv .fgrid { margin-top: 0.4rem; }
+
+.empty {
+  border: 1px dashed var(--border); border-radius: 8px; padding: 0.9rem;
+  font-size: 0.74rem; color: var(--sentinel); text-align: center;
+}
+
+/* A reload is the one thing on this page that interrupts mining, so it is the
+   one thing that gets a banner rather than a quiet line. */
+#reloadBanner {
+  display: none; margin: 0 auto 0.9rem; max-width: 1100px;
+  border: 1px solid var(--bad); border-radius: 8px;
+  background: rgba(232,93,93,.08); color: var(--bad);
+  padding: 0.5rem 0.8rem; font-size: 0.74rem;
+}
+#reloadBanner.show { display: block; }
+
+/* A frame-timing readout, off unless ?perf=1 is in the URL.
+   Jank of this kind cannot be measured from a background tab -- the browser
+   suspends rendering there, which is exactly the work under suspicion -- so
+   the page has to be able to measure itself in the tab somebody is looking
+   at. */
+#perfHud {
+  display: none; position: fixed; right: 0.6rem; bottom: 0.6rem; z-index: 99;
+  background: rgba(0,0,0,.86); border: 1px solid var(--accent); border-radius: 6px;
+  color: var(--text); font-size: 0.68rem; line-height: 1.5; padding: 0.5rem 0.7rem;
+  white-space: pre; pointer-events: none; min-width: 15rem;
+}
+#perfHud.show { display: block; }
+
+/* The same shape as the reload banner, in the colour of a wait rather than a
+   fault. It appears only while something is actually arriving, so it reads as
+   a running commentary on this moment and not as standing advice nobody
+   reads. */
+#waitBanner {
+  display: none; margin: 0 auto 0.9rem; max-width: 1100px;
+  border: 1px solid var(--waiting); border-radius: 8px;
+  background: rgba(127,147,173,.07); color: var(--waiting);
+  padding: 0.5rem 0.8rem; font-size: 0.74rem;
+}
+#waitBanner.show { display: block; }
+
+/* ---- setup gate ----
+   Shown INSTEAD of the dashboard when there is nothing to display. A dashboard
+   full of dashes with a wizard floating over it invites reading the dashes. */
+#setupGate { display: none; padding: 3rem 1.5rem; }
+#setupGate.show { display: block; }
+#setupGate .inner { max-width: 34rem; margin: 0 auto; text-align: center; }
+#setupGate h2 { font-size: 1.1rem; margin: 0 0 0.6rem; }
+#setupGate p { font-size: 0.8rem; color: var(--dim); line-height: 1.6; margin: 0 0 1rem; }
+#setupGate code {
+  font-family: inherit; color: var(--text);
+  background: var(--fill); border: 1px solid var(--border);
+  border-radius: 4px; padding: 0.05rem 0.3rem;
+}
+body.unconfigured main > section { display: none; }
+
+/* ---- help markers and popover ----
+   Ported wholesale from blockwatch, down to the hide delay and the offset,
+   so the two dashboards behave identically. The native title tooltip is kept
+   for table column headers -- those explanations are one line, the delay
+   before a native tip appears is a feature there, and two dozen markers in a
+   header row would be visual noise. Anything longer than a line gets a real
+   popover: title text cannot be styled, cannot be read at leisure, and is
+   truncated or suppressed outright by some browsers. */
+.help {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 0.95rem; height: 0.95rem; flex-shrink: 0;
+  border: 1px solid var(--border); border-radius: 50%;
+  color: var(--dim); background: none;
+  font-family: inherit; font-size: 0.6rem; line-height: 1;
+  cursor: help; padding: 0; vertical-align: middle;
+  text-transform: none; letter-spacing: 0;
+}
+.help:hover, .help:focus-visible, .help[aria-expanded="true"] {
+  color: var(--accent); border-color: var(--accent); outline: none;
+}
+.label .help { margin-left: 0.4rem; }
+.stat .help { position: absolute; top: 0.45rem; right: 0.5rem; }
+header .help { margin-left: 0.35rem; }
+/* Fixed positioning so the popover escapes the flow card's own overflow and
+   the tables' horizontal scroll containers, which would otherwise clip it. */
+#helpPop {
+  /* Above the modals (80), not merely above the page. The help markers inside
+     the config form are the ones people actually need, and a popover that
+     opens BEHIND the sheet that raised it is worse than no popover -- it looks
+     like a bug and it hides the answer. */
+  position: fixed; z-index: 100; display: none; max-width: 24rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--accent); border-radius: 8px;
+  background: var(--panel); box-shadow: 0 6px 24px rgba(0,0,0,.55);
+  color: var(--text); font-size: 0.74rem; line-height: 1.5;
+  text-transform: none; letter-spacing: 0; font-weight: 400; text-align: left;
+}
+#helpPop.show { display: block; }
+#helpPop p { margin: 0 0 0.45rem; }
+#helpPop p:last-child { margin-bottom: 0; }
+#helpPop b { color: var(--accent); font-weight: 600; }
+#helpPop .k { color: var(--dim); font-variant-numeric: tabular-nums; }
+
+/* ---- readout strip ---- */
+/* CAP THE CARD, NOT THE ROW.
+   This was `1fr` inside a `max-width: 1100px`, which is a number that has to
+   be re-derived every time a card is added: six cards at their 9.5rem minimum
+   fit in 1100px, seven do not, so adding one silently wrapped a single card
+   onto a line of its own with half the page empty beside it.
+   Bounding the track instead removes the arithmetic. auto-fit still decides
+   how many columns fit -- so this wraps properly on a narrow window -- but a
+   card never stretches past 13rem, which is what the row cap was really for.
+   Nothing needs recalculating when the next card arrives. */
+.strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(9.5rem, 13rem)); gap: 0.6rem; }
+.stat { position: relative; border: 1px solid var(--border); border-radius: 8px; background: var(--fill); padding: 0.5rem 0.7rem; }
+.stat .k { padding-right: 1.1rem; }
+.stat .k { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--dim); }
+.stat .v { font-size: 1.15rem; font-variant-numeric: tabular-nums; margin-top: 0.1rem; }
+.stat .v.sm { font-size: 0.82rem; }
+.stat .sub { font-size: 0.68rem; color: var(--sentinel); }
+
+/* ---- flow diagram ----
+   Nodes are ordinary DOM in a grid; the connectors are one SVG overlaid on
+   top, with its geometry measured from the nodes' own rects after every
+   render. Measuring rather than assuming is what lets the same markup reflow
+   from three columns to a vertical stack without any path going wrong. */
+#flowCard { border: 1px solid var(--border); border-radius: 8px; background: var(--fill); padding: 1.6rem 1.4rem; }
+#flow {
+  position: relative; display: grid;
+  /* Four content columns with the GAPS AS EXPLICIT TRACKS, which is the only
+     way to give one gap different behaviour from another.
+     The three switchyard hops get flexible 1fr gaps that soak up any spare
+     width; the gateway-to-pool gap is a small fixed one. That hop is
+     informational -- switchyard does not own it and cannot measure it -- so
+     spending horizontal room on it starves the connections that matter. On a
+     narrow screen the difference is the whole diagram fitting or not. */
+  grid-template-columns:
+    minmax(10rem, 15rem) minmax(1.5rem, 1fr)
+    minmax(18rem, 26rem) minmax(1.5rem, 1fr)
+    minmax(12rem, 17rem) 5rem
+    minmax(9rem, 13rem);
+  justify-content: space-between;
+  gap: 0; align-items: center;
+}
+#colRigs  { grid-column: 1; }
+#colHub   { grid-column: 3; }
+#colGws   { grid-column: 5; }
+#colPools { grid-column: 7; }
+#links { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+/* Transient effects live on their own layer, above the links and outside the
+   re-render.
+   The rotation spark used to be drawn into #links, which drawLinks clears on
+   every poll -- so a 3.6s spark on a 2s refresh was destroyed at 55% of its
+   travel, right as it reached the gateway. It looked like the spark touched
+   the box and vanished, because that is exactly what happened. Nothing here is
+   ever cleared wholesale; each effect removes itself when it finishes. */
+#fx { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; z-index: 2; }
+.col { display: flex; flex-direction: column; gap: 1.5rem; position: relative; z-index: 1; }
+/* The gateway and pool columns are laid out as a shared grid rather than two
+   independent stacks, so row N of one sits at exactly the height of row N of
+   the other and the connector between them is a straight horizontal line.
+   Two flex columns with different content heights drift apart by a few pixels
+   per row, and every one of those pixels becomes a curve in a link that
+   represents a direct, one-to-one relationship. */
+#colGws, #colPools {
+  display: grid;
+  grid-template-rows: auto repeat(var(--rows, 1), minmax(0, 1fr));
+  gap: 1.5rem;
+  /* Both columns are stretched to the FULL height of the flow area and then
+     divided into the same number of equal rows. That is what makes it work:
+     sized to their own content instead, the taller gateway column gets taller
+     rows, and only the middle pair ends up level -- which is precisely the
+     drift that put a curve in every connector. */
+  align-self: stretch;
+  align-content: stretch;
+}
+#colGws > .node, #colPools > .node { align-self: center; }
+.colhead { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.09em; color: var(--dim); margin-bottom: -0.6rem; }
+
+.node {
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel); padding: 0.75rem 0.9rem;
+  transition: border-color .6s, box-shadow .6s, background .6s;
+}
+.node .n { font-weight: 600; font-size: 0.9rem; }
+.node .m { font-size: 0.73rem; color: var(--dim); }
+.node .m b { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
+.node .m .sentinel { color: var(--sentinel); font-style: italic; }
+.node .m .ok   { color: var(--good); }
+.node .m .warn { color: var(--accent); }
+.node .m .bad  { color: var(--bad); }
+.node .m .off  { color: var(--bad); }
+.node .sep { height: 1px; background: var(--border); margin: 0.5rem -0.9rem 0.45rem; }
+
+.node.live { border-color: var(--good); }
+.node.dark { border-color: var(--border); }
+/* Its own colour, not red and not switchyard's amber: the rig is where it
+   should be and the miner has not arrived yet, which is a state to wait
+   through rather than a fault to act on. */
+.node.arriving { border-color: var(--waiting); }
+.node.arriving .where { color: var(--waiting); }
+.pending { color: var(--waiting); }
+.node.offline { border-color: var(--bad); }
+.node.hub { border-color: var(--accent); }
+.node.hub .n { color: var(--accent); }
+
+/* The pool nodes are deliberately quieter than the gateway nodes beside them.
+   Everything switchyard MEASURES lives on the gateway; a pool box carries an
+   operator's label and an average derived from gateway traffic. Making them
+   look equally authoritative would undo the point of separating them. */
+.node.pool { background: transparent; }
+.node.pool .n { font-size: 0.82rem; }
+.node.pool .m .unknown { color: var(--sentinel); font-style: italic; }
+.gwaddr { font-size: 0.68rem; color: var(--sentinel); font-variant-numeric: tabular-nums; }
+
+/* The gateway-to-pool hop is not switchyard's link and is not measured by it,
+   so it is drawn in a third style: continuous, but neutral and never pulsing.
+   Giving it the same teal as a measured link -- or worse, a hashrate label --
+   would be inventing a reading. */
+.link.beyond { stroke: var(--heartbeat); stroke-width: 1.4; opacity: .85; }
+.link.beyond.on { stroke: var(--good); opacity: .55; }
+.linklabel.beyond { fill: var(--heartbeat); font-style: italic; }
+
+/* Port rows double as the anchor points for this rig's connectors. That is
+   what untangles the diagram: every line into and out of switchyard starts at
+   the specific listener it belongs to, so a line can be followed from rig to
+   pool by eye instead of guessed at. It also puts the ports on screen, which
+   is the thing you need when pointing a miner at this. */
+/* Three columns rather than a flex run: the port left, the arrow on a fixed
+   centre, the pool right. With names of different lengths a left-aligned run
+   put every arrow at a different x, so the eye had to re-find the mapping on
+   each row; pinned to a column they read as one table. */
+.port {
+  display: grid; grid-template-columns: auto 1fr auto;
+  align-items: baseline; gap: 0.5rem;
+  font-size: 0.73rem; color: var(--dim);
+  padding: 0.2rem 0.1rem;
+}
+.port .p { color: var(--text); font-variant-numeric: tabular-nums; text-align: left; }
+.port .arrow { text-align: center; color: var(--heartbeat); }
+.port .to { color: var(--good); text-align: right; }
+.port .to.none { color: var(--sentinel); }
+
+/* Solid means carrying work; dashed means held open but idle. The earlier
+   version had these backwards -- a dash reads as a weak or intermittent
+   connection, which is exactly the wrong thing to say about the one link
+   actually doing the job. */
+.link { fill: none; stroke-width: 1.7; transition: stroke .6s, opacity .6s, stroke-width .6s; }
+.link.idle   { stroke: var(--heartbeat); stroke-dasharray: 4 6; opacity: .9; }
+.link.active { stroke: var(--good); stroke-width: 2.2; }
+/* A dot travelling the line is the ambient signal that work is moving. It
+   replaces the old dash drift, which cannot exist on a solid stroke. */
+/* The circle is drawn at the origin and placed entirely by offset-distance,
+   so it needs no cx/cy of its own. */
+@keyframes travel { from { offset-distance: 0%; } to { offset-distance: 100%; } }
+.pulse { fill: var(--good); opacity: .85; }
+/* Dimmer on the leg switchyard does not own, matching the line it travels. */
+.pulse.beyond { fill: var(--good); opacity: .45; }
+.spark { fill: none; stroke: var(--gold); stroke-width: 3.4; stroke-linecap: round; }
+.linklabel { font-size: 10.5px; font-family: ui-monospace, Consolas, monospace; fill: var(--sentinel); }
+.linklabel.on { fill: var(--good); }
+
+/* Arrival and departure get different treatments on purpose: a pool lighting
+   up and a pool going dark are opposite events, and a generic "something
+   changed" pulse would lose the part that matters at a glance. Both run long
+   -- a rotation happens every few minutes at most, so there is no reason for
+   its animation to be brief, and a fast one is simply missed. */
+.node.arrive { animation: arrive 4.4s ease-out; }
+.node.depart { animation: depart 4.4s ease-out; }
+@keyframes arrive {
+  0%   { border-color: var(--gold); box-shadow: 0 0 0 0 rgba(242,193,78,.5); background: rgba(242,193,78,.08); }
+  35%  { border-color: var(--gold); box-shadow: 0 0 0 12px rgba(242,193,78,0); background: rgba(242,193,78,.08); }
+  100% { border-color: var(--good); box-shadow: none; background: var(--panel); }
+}
+@keyframes depart {
+  0%   { border-color: var(--heartbeat); background: rgba(107,118,132,.14); }
+  55%  { border-color: var(--heartbeat); background: rgba(107,118,132,.14); }
+  100% { border-color: var(--border); background: var(--panel); }
+}
+
+/* ---- collapsible sections ----
+   Every section folds; only Outbound connections starts folded. It is a
+   sanity check rather than a readout -- something you go and look at when you
+   want reassurance, not something worth six rows of screen on every load.
+   Native <details> so it works before the script runs, keeps keyboard
+   behaviour, and is findable by the browser's own text search. */
+details.sec { margin: 0; }
+details.sec > summary { list-style: none; cursor: pointer; }
+details.sec > summary::-webkit-details-marker { display: none; }
+details.sec > summary .label { display: flex; align-items: center; margin-bottom: 0.5rem; }
+details.sec > summary .caret {
+  display: inline-block; width: 0.8rem; flex-shrink: 0;
+  color: var(--sentinel); transition: transform .18s ease;
+}
+details.sec[open] > summary .caret { transform: rotate(90deg); }
+details.sec > summary:hover .label { color: var(--text); }
+details.sec > summary:focus-visible .label { outline: 1px solid var(--accent); outline-offset: 2px; }
+/* The hint sits to the right of the heading and should not shove the caret
+   around when its text changes length. */
+details.sec > summary .label .hint { margin-left: 0.5rem; }
+
+/* A panel around the share-of-work rows, so the section reads as an enclosed
+   card like the flow diagram and the tables rather than floating on the page
+   background. */
+.panel {
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--fill); padding: 0.9rem 1.1rem;
+}
+
+/* ---- share of work ---- */
+.conv { display: flex; flex-direction: column; gap: 0.6rem; }
+/* One template for both: the axis row's tick track only lines up under the
+   bars while its columns match the bar rows exactly. As two declarations that
+   held by coincidence, and any later change to the name or numbers column
+   would have slid the ticks out from under the bars silently. */
+.crow, .cscale { display: grid; grid-template-columns: 7rem 1fr 20rem; gap: 1rem; align-items: center; }
+.cname { font-weight: 600; }
+.bar { position: relative; height: 1rem; background: rgba(255,255,255,.04); border-radius: 3px; }
+
+/* The zones ARE the legend.
+   Colour used to live on the bar itself, which meant the one thing you needed
+   to judge -- how much room is left before this pool counts as lopsided -- was
+   invisible precisely while everything was fine. A green bar sitting inside a
+   faint band told you the verdict and hid the margin.
+   So the verdict moves to the background: a green zone out to one sigma, amber
+   to two, red beyond. The bar is now a neutral marker whose only job is to say
+   how far along it reaches, and the zone it lands in gives the answer without
+   anything having to change colour. */
+.bar .zone {
+  position: absolute; top: -4px; bottom: -4px;
+  pointer-events: auto; cursor: help;
+}
+.bar .zone.ok   { background: rgba(79,195,161,.20); }
+.bar .zone.warn { background: rgba(217,154,43,.16); }
+.bar .zone.bad  { background: rgba(232,93,93,.14); }
+/* Hairlines where one zone gives way to the next. The boundary is the number
+   people actually read off this chart, so it gets an edge rather than being
+   left to a change in fill alone. */
+.bar .zone + .zone { box-shadow: inset 1px 0 0 rgba(255,255,255,.10); }
+
+/* The measurement. Deliberately quiet and deliberately NOT colour-coded --
+   the zones behind it carry that. Slightly inset so the zones read as a scale
+   it is measured against rather than as decoration around it. */
+/* The measurement, and the tip is the part that matters.
+   The body of the bar is only faintly filled so the zones read through it --
+   an opaque bar would hide the very region its tip is landing in, and a solid
+   one would fight the zones for attention. The tip itself is a bright cap, so
+   "where does this pool actually sit" is a single unambiguous edge rather than
+   something to estimate from the end of a wash of colour. */
+/* The measurement. Coloured by the band its tip lands in -- the zones say
+   where the boundaries are, the fill says which side of them this pool is on,
+   and having both means neither has to be decoded from the other. Translucent
+   enough that the zone beneath still reads, solid enough to be unmistakably
+   there; the first attempt at this was so faint it looked like a rendering
+   artefact. The bright cap is the exact value. */
+.bar .got {
+  position: absolute; top: 2px; bottom: 2px; left: 0;
+  background: rgba(215,221,227,.42);
+  border-right: 2px solid var(--text);
+  border-radius: 2px 0 0 2px;
+  z-index: 2;
+}
+.bar .got.ok   { background: rgba(79,195,161,.50); border-right-color: var(--good); }
+.bar .got.warn { background: rgba(217,154,43,.50); border-right-color: var(--accent); }
+.bar .got.bad  { background: rgba(232,93,93,.50);  border-right-color: var(--bad); }
+/* Ideal split: the one landmark, taller than everything else so it reads as a
+   reference line rather than another band edge. */
+.bar .exp {
+  position: absolute; top: -6px; bottom: -6px; width: 2px;
+  background: var(--landmark); z-index: 3; cursor: help;
+}
+/* THE AXIS ZOOMS, SO IT HAS TO BE LABELLED.
+   The window is a multiple of sigma, and sigma shrinks as rotations
+   accumulate -- so the coloured zones sit at the same fractions of the bar
+   forever and the chart looks identical after fifteen hours as after one. It
+   is not stuck: it is zooming in at exactly the rate the band narrows. That
+   is the right behaviour (a band you cannot see the edges of is useless) but
+   with no numbers on the axis it is indistinguishable from nothing happening.
+   These ticks are how the zoom becomes legible: the endpoints converge on the
+   even split as the estimate tightens. */
+.cscale { margin-top: -0.1rem; }
+.cscale .track { position: relative; height: 1.1rem; border-top: 1px solid rgba(255,255,255,.08); }
+.cscale .t {
+  position: absolute; top: 0.15rem; font-size: 0.66rem; color: var(--dim);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+/* lo needs an explicit left: an absolutely positioned element with left:auto
+   falls back to its static position, so lo and mid both sat at the left edge
+   and printed on top of each other. mid's left is set from JS, because where
+   the even split falls is not a constant -- see below. */
+.cscale .t.lo  { left: 0; }
+.cscale .t.mid { transform: translateX(-50%); }
+.cscale .t.hi  { right: 0; }
+.cscale .t::before {
+  content: ""; position: absolute; top: -0.28rem; left: 0; width: 1px;
+  height: 0.22rem; background: rgba(255,255,255,.18);
+}
+.cscale .t.mid::before { left: 50%; }
+.cscale .t.hi::before  { left: auto; right: 0; }
+
+.cnum { font-size: 0.75rem; color: var(--dim); font-variant-numeric: tabular-nums; text-align: right; }
+.cnum b { color: var(--text); font-weight: 500; }
+.cnum .dev.ok   { color: var(--good); }
+.cnum .dev.warn { color: var(--accent); }
+.cnum .dev.bad  { color: var(--bad); }
+.cnum .dev.none { color: var(--sentinel); }
+
+/* Legend for the marks on the bars. These used to be explained in a tooltip on
+   the section heading, which is the wrong place twice over: you have to already
+   suspect the marks mean something to go looking, and the explanation is then
+   nowhere near the thing it explains. Drawn from the same CSS as the marks
+   themselves, so a swatch cannot drift out of step with what is on the bar. */
+.clegend {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 1.1rem;
+  font-size: 0.68rem; color: var(--dim);
+  padding: 0 0 0.25rem calc(7rem + 1rem);
+}
+@media (max-width: 1100px) { .clegend { padding-left: 0; } }
+.clegend .li { display: inline-flex; align-items: center; gap: 0.4rem; }
+.clegend .sw { display: inline-block; height: 0.8rem; }
+.clegend .sw.tick { width: 2px; background: var(--landmark); }
+.clegend .sw.zok   { width: 1.6rem; background: rgba(79,195,161,.20); }
+.clegend .sw.zwarn { width: 1.6rem; background: rgba(217,154,43,.16); }
+.clegend .sw.zbad  { width: 1.6rem; background: rgba(232,93,93,.14); }
+.clegend .sw.got   { width: 1.6rem; background: rgba(215,221,227,.42); border-right: 2px solid var(--text); border-radius: 2px 0 0 2px; }
+
+/* The marks are one and two pixels wide, so they need a hit area far larger
+   than their ink or they cannot be pointed at. A transparent pad centred on
+   the mark gives them one without changing how they look. */
+[data-mark] { cursor: help; }
+.bar .band, .bar .band2, .bar .exp { cursor: help; }
+.bar .band2, .bar .exp { box-sizing: content-box; border-left: 5px solid transparent; border-right: 5px solid transparent; margin-left: -5px; background-clip: content-box; }
+
+/* ---- two tables side by side ---- */
+.pair { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 1.5rem; align-items: start; }
+@media (max-width: 1100px) { .pair { grid-template-columns: 1fr; } }
+.scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--fill); }
+table { border-collapse: collapse; width: 100%; font-size: 0.76rem; }
+th, td { text-align: left; padding: 0.4rem 0.75rem; white-space: nowrap; }
+th { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); border-bottom: 1px solid var(--border); }
+td { border-bottom: 1px solid rgba(35,42,51,.55); }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr.bound td { background: rgba(79,195,161,.05); }
+tr.bound td:first-child { box-shadow: inset 2px 0 0 var(--good); }
+.rhead td { color: var(--accent); font-weight: 600; padding-top: 0.7rem; border-bottom: 1px solid var(--border); }
+.rhead .off { color: var(--bad); font-weight: 400; }
+.rhead .on { color: var(--dim); font-weight: 400; }
+.sdot { display: inline-block; width: 0.45rem; height: 0.45rem; border-radius: 50%; background: var(--heartbeat); margin-right: 0.5rem; vertical-align: middle; }
+.sdot.up { background: var(--good); }
+.sdot.down { background: var(--bad); }
+.sentinel { color: var(--sentinel); }
+.stale { color: var(--accent); }
+/* A closed row is not an error -- an upstream reconnects constantly and a rig
+   that has never connected has no sessions at all -- so it is dimmed rather
+   than reddened. */
+tr.off td { color: var(--sentinel); }
+p.foot { font-size: 0.7rem; color: var(--sentinel); margin: 0.5rem 0 0; }
+.caption { color: var(--dim); font-size: 0.7rem; margin: 0.5rem 0 0; }
+
+/* Modelled on blockwatch's #versionLine, down to the padding and alignment. */
+#versionLine {
+  color: var(--dim); font-size: 0.72rem;
+  padding: 0.35rem 1.2rem 0.6rem; text-align: right;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+/* The address is the one thing here that is not a label -- it is a value, and
+   a value that must survive being copied. Uppercasing is only a CSS transform
+   so the clipboard would still be correct, but a bech32 address shown in caps
+   invites a hand-typed transcription that some wallets will refuse. */
+#versionLine .tip .a { text-transform: none; letter-spacing: 0; }
+#versionLine a { color: var(--dim); }
+#versionLine a:hover { color: var(--text); }
+/* Donation address. The quietest element on the page by design: the same dim
+   grey as the version string beside it, no label, no border, no colour of its
+   own. An address sitting here reads as an offer; the same address in a
+   callout would read as a request. */
+#versionLine .tip { cursor: pointer; }
+#versionLine .tip:hover { color: var(--text); }
+#versionLine .tip.copied { color: var(--good); }
+
+/* Motion. The OS setting is respected by default, but it can be overridden in
+   the header -- because "reduce motion" was suppressing the rotation animation
+   entirely, which meant the one event this page exists to show was invisible
+   to anyone with Windows animation effects switched off. An explicit choice
+   beats a silent one in both directions. */
+:root[data-motion="off"] .pulse,
+:root[data-motion="off"] .spark { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="on"]) .pulse,
+  :root:not([data-motion="on"]) .spark { display: none; }
+  :root:not([data-motion="on"]) .node.arrive { animation: arriveStill 2.6s ease-out; }
+  :root:not([data-motion="on"]) .node.depart { animation: departStill 2.6s ease-out; }
+}
+@keyframes arriveStill {
+  0%, 60% { border-color: var(--gold); background: rgba(242,193,78,.10); }
+  100%    { border-color: var(--good); background: var(--panel); }
+}
+@keyframes departStill {
+  0%, 60% { border-color: var(--heartbeat); background: rgba(107,118,132,.13); }
+  100%    { border-color: var(--border); background: var(--panel); }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <span class="dot" id="connDot" title="Dashboard connection to switchyard"></span>
+  <h1>switchyard</h1>
+  <span class="tag">rig &rarr; pool assignment</span>
+  <span id="blockFlash"></span>
+  <span class="spacer"></span>
+  <button id="configBtn" class="call">configure&hellip;</button><button class="help" type="button" data-help="configure" aria-label="What is this?">?</button>
+  <button id="rotateBtn" class="act">rotate now</button><button class="help" type="button" data-help="rotate" aria-label="What is this?">?</button>
+  <button id="motionBtn">motion: auto</button><button class="help" type="button" data-help="motion" aria-label="What is this?">?</button>
+  <button id="resetBtn" class="danger">reset stats</button><button class="help" type="button" data-help="reset" aria-label="What is this?">?</button>
+</header>
+
+<main>
+  <div id="reloadBanner"></div>
+  <div id="perfHud"></div>
+  <div id="waitBanner"></div>
+
+  <!-- Shown instead of the dashboard when there is nothing to show. -->
+  <section id="setupGate">
+    <div class="inner">
+      <h2 id="setupGateTitle">Nothing configured yet</h2>
+      <p id="setupGateLede">Switchyard moves miners between DATUM gateways so
+         each pool gets an even share of your work. It needs to know about at
+         least one rig and one pool before it can do anything.</p>
+      <p>Everything set up here is written to <code>config.json</code>.
+         That file is the source of truth &mdash; editing it by hand and
+         restarting works exactly the same way, and this form is only a
+         convenience.</p>
+      <button class="btn primary" id="setupStartBtn">Set up switchyard</button>
+    </div>
+  </section>
+
+  <section class="strip">
+    <div class="stat"><div class="k">Hashrate<button class="help" type="button" data-help="statHashrate" aria-label="What is this?">?</button></div><div class="v" id="sTotal">&mdash;</div><div class="sub" id="sTotalAvg">&mdash;</div></div>
+    <div class="stat"><div class="k">Rotations<button class="help" type="button" data-help="statRotations" aria-label="What is this?">?</button></div><div class="v" id="sRot">&mdash;</div><div class="sub" id="sStep">&mdash;</div></div>
+    <div class="stat"><div class="k">Rotation cost<button class="help" type="button" data-help="statCost" aria-label="What is this?">?</button></div><div class="v" id="sCost">&mdash;</div><div class="sub" id="sCostSub">&mdash;</div></div>
+    <div class="stat"><div class="k">Since last rotation<button class="help" type="button" data-help="statOnPool" aria-label="What is this?">?</button></div><div class="v" id="sDwell">&mdash;</div><div class="sub" id="sNext">&mdash;</div></div>
+    <div class="stat"><div class="k">Dwell<button class="help" type="button" data-help="statDwell" aria-label="What is this?">?</button></div><div class="v sm" id="sDwellRange">&mdash;</div><div class="sub">floor &middot; ceiling</div></div>
+    <div class="stat"><div class="k">Chain tip<button class="help" type="button" data-help="statTip" aria-label="What is this?">?</button></div><div class="v sm" id="sTip">&mdash;</div></div>
+    <div class="stat"><div class="k">Uptime<button class="help" type="button" data-help="statUptime" aria-label="What is this?">?</button></div><div class="v" id="sUp">&mdash;</div><div class="sub" id="sPoll">&mdash;</div></div>
+  </section>
+
+  <section>
+    <details class="sec" open>
+      <summary><p class="label"><span class="caret">&#9656;</span>Flow<button class="help" type="button" data-help="flow" aria-label="What is this?">?</button><span class="hint">rigs &rarr; switchyard &rarr; DATUM gateways &rarr; pools</span></p></summary>
+    <div id="flowCard">
+      <div id="flow">
+        <svg id="links"></svg>
+        <svg id="fx"></svg>
+        <div class="col" id="colRigs"></div>
+        <div class="col" id="colHub"></div>
+        <div class="col" id="colGws"></div>
+        <div class="col" id="colPools"></div>
+      </div>
+    </div>
+      </details>
+  </section>
+
+  <section>
+    <details class="sec" open>
+      <summary><p class="label"><span class="caret">&#9656;</span>Share of work vs an even split<button class="help" type="button" data-help="share" aria-label="What is this?">?</button><span class="hint" id="convHint"></span></p></summary>
+    <div class="panel">
+    <div class="clegend">
+      <span class="li"><span class="sw got"></span>share received</span>
+      <span class="li"><span class="sw tick"></span>even split</span>
+      <span class="li"><span class="sw zok"></span>within 1&sigma;</span>
+      <span class="li"><span class="sw zwarn"></span>1&ndash;2&sigma;</span>
+      <span class="li"><span class="sw zbad"></span>beyond 2&sigma;</span>
+      <span class="li" id="legendVals"></span>
+    </div>
+    <div class="conv" id="conv"></div>
+    </div>
+      </details>
+  </section>
+
+  <section class="pair">
+    <div>
+      <details class="sec" open>
+        <summary>
+      <p class="label"><span class="caret">&#9656;</span>Gateway sessions<button class="help" type="button" data-help="sessions" aria-label="What is this?">?</button></p></summary>
+      <div class="scroll"><table>
+        <thead><tr>
+          <th title="The gateway this session is connected to.">Pool</th>
+          <th title="Whether this session is currently carrying its rig, or merely held open.">Session</th>
+          <th class="num" title="Share difficulty this gateway has assigned to this session.">Diff</th>
+          <th class="num" title="Long-run average hashrate this rig has delivered to this pool, over the whole run.">TH/s</th>
+          <th class="num" title="Shares this rig has sent to this gateway.">Sub</th>
+          <th class="num" title="Shares this gateway accepted.">Acc</th>
+          <th class="num" title="Shares this gateway rejected. A handful at rotation boundaries is normal - those are in-flight shares landing after the job moved on.">Rej</th>
+          <th class="num" title="How long since THIS rig last had a share accepted here.">Last</th>
+        </tr></thead>
+        <tbody id="tbody"></tbody>
+      </table></div>
+      <p class="caption">Every rig holds an open session to every gateway at all times; only the binding moves.</p>
+          </details>
+    </div>
+    <div>
+      <details class="sec" open>
+        <summary>
+      <p class="label"><span class="caret">&#9656;</span>Pools<button class="help" type="button" data-help="poolsTable" aria-label="What is this?">?</button><span class="hint">from any rig</span></p></summary>
+      <div class="scroll"><table>
+        <thead><tr>
+          <th title="The pool, via its own dedicated gateway.">Pool</th>
+          <th title="Which rig is on it right now, if any.">Carrying</th>
+          <th class="num" title="Hashrate this pool is receiving right now, measured over the last few minutes.">Now</th>
+          <th class="num" title="Shares this pool has accepted from any of your rigs.">Acc</th>
+          <th class="num" title="Shares this pool rejected from any of your rigs.">Rej</th>
+          <th class="num" title="How long since ANY of your rigs last had a share accepted here. This is the number that says whether the pool still considers you active.">Last</th>
+        </tr></thead>
+        <tbody id="pbody"></tbody>
+      </table></div>
+      <p class="caption" id="poolCaption">&nbsp;</p>
+          </details>
+    </div>
+  </section>
+  <section>
+    <details class="sec">
+      <summary><p class="label"><span class="caret">&#9656;</span>Outbound connections<button class="help" type="button" data-help="outbound" aria-label="What is this?">?</button><span class="hint">everywhere switchyard is talking to</span></p></summary>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th title="The address from config.json that switchyard dialled.">Destination</th>
+            <th title="The address the socket actually connected to, after name resolution.">Resolved</th>
+            <th title="Which rig's session this is.">Rig</th>
+            <th title="How long this socket has been open.">Open</th>
+          </tr>
+        </thead>
+        <tbody id="obody"></tbody>
+      </table>
+    </div>
+    <p class="foot" id="obFoot"></p>
+      </details>
+  </section>
+</main>
+
+<!-- Reset confirmation. The button is destructive and one stray click away
+     from every number on the page, so it asks first. -->
+<div class="modal" id="resetModal" data-dismiss="backdrop">
+  <div class="sheet narrow">
+    <header>
+      <h2 class="bad">Reset all statistics?</h2>
+      <p class="lede">Clears every counter, average and share-of-work figure,
+         and restarts the clock they are measured from.</p>
+    </header>
+    <div class="body">
+      <p class="lede" style="margin:0">Nothing disconnects. Rig sessions,
+         gateway sessions, difficulty and the rotation schedule all carry on
+         untouched &mdash; only the measurements go.</p>
+      <p class="lede">The fairness band will widen again afterwards, because it
+         genuinely will know less. This cannot be undone.</p>
+    </div>
+    <div class="foot">
+      <span class="spacer"></span>
+      <button class="btn" id="resetCancelBtn">Cancel</button>
+      <button class="btn bad" id="resetConfirmBtn">Yes, reset</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="rotateModal">
+  <div class="sheet narrow">
+    <header>
+      <h2>Rotate now?</h2>
+      <p class="lede">Moves every rig to its next pool immediately, ignoring
+         the dwell floor and the block that would normally trigger it.</p>
+    </header>
+    <div class="body">
+      <p class="lede" style="margin:0">Each rig reconnects once. Rotations
+         forced by hand are counted like any other, so doing this often will
+         skew the share-of-work figures.</p>
+    </div>
+    <div class="foot">
+      <span class="spacer"></span>
+      <button class="btn bad" id="rotateCancelBtn">Cancel</button>
+      <button class="btn" id="rotateConfirmBtn">Yes, rotate</button>
+    </div>
+  </div>
+</div>
+
+<!-- Config editor. Also the first-run form: one implementation, so what a new
+     operator fills in and what an existing one edits cannot drift apart. -->
+<div class="modal" id="configModal">
+  <div class="sheet">
+    <header>
+      <button class="xclose" id="configCloseBtn" type="button" aria-label="Close without saving">&times;</button>
+      <h2 id="configTitle">Configuration</h2>
+      <p class="lede" id="configLede"></p>
+      <p class="pending" id="configPending"></p>
+    </header>
+    <div class="body" id="configBody"></div>
+    <div class="foot">
+      <span class="msg" id="configMsg"></span>
+      <span class="spacer"></span>
+      <button class="btn bad" id="configCancelBtn">Cancel</button>
+      <button class="btn primary" id="configSaveBtn">Save and apply</button>
+    </div>
+  </div>
+</div>
+
+<div id="versionLine">switchyard <span id="versionText">&mdash;</span> &middot; <a id="repoLink" href="https://github.com/Insulince/switchyard" target="_blank" rel="noopener noreferrer">source</a> &middot; <span class="tip" data-addr="bc1q8p0tut4cx4radkg3r6qja9szd4ay8v9pjp9hf0" title="Donations - Click to copy address">&#8383; <span class="a">bc1q8p0tut4cx4radkg3r6qja9szd4ay8v9pjp9hf0</span></span></div>
+
+<script>
+"use strict";
+
+var $ = function (id) { return document.getElementById(id); };
+var SVGNS = "http://www.w3.org/2000/svg";
+
+function el(tag, cls, txt) {
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (txt !== undefined) e.textContent = txt;
+  return e;
+}
+function svgEl(tag, attrs) {
+  var e = document.createElementNS(SVGNS, tag);
+  for (var k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+function num(n) { return (n || 0).toLocaleString("en-US"); }
+// Two decimals normally, three only when the value would otherwise read as a
+// flat zero -- an idle link showing "0.00" and one that has never been used
+// are different facts.
+// MINER_GRACE is how long an absent miner is reported as "still arriving"
+// rather than "not connected".
+//
+// Nothing here can hurry a miner along. When switchyard restarts, or a config
+// is applied, or a rotation moves a rig, the miner finds its connection gone
+// and reconnects on ITS OWN firmware's schedule -- typically half a minute,
+// occasionally two or three, and staggered when there is more than one. For
+// that whole window a correct setup and a broken one look identical, and the
+// page used to render both as flat red, which reads as a verdict rather than
+// a wait.
+//
+// Two and a half minutes covers the firmware retry backoff this has been seen
+// to take. Past it, something probably is wrong and the page says so.
+var MINER_GRACE = 150;
+
+// rigState collapses connected / arriving / absent into one decision, so the
+// four places that draw a rig cannot disagree about what they are looking at.
+function rigState(r) {
+  if (r.connected) return "live";
+  if (r.waitingSeconds <= MINER_GRACE) return "arriving";
+  return "absent";
+}
+
+// The wait, phrased as a clock. A number that visibly climbs is the difference
+// between "it is working on it" and "it is stuck".
+function waitLabel(r) {
+  var verb = r.everSeen ? "reconnecting" : "waiting for miner";
+  var t = r.waitingSeconds || 0;
+  var pretty = t < 60 ? t + "s" : Math.floor(t / 60) + "m " + (t % 60) + "s";
+  return verb + " · " + pretty + " so far";
+}
+
+function ths(v) { v = v || 0; if (v === 0) return "0.00"; return v < 0.01 ? v.toFixed(3) : v.toFixed(2); }
+function ago(then, now) {
+  if (!then || then.indexOf("0001-") === 0) return "never";
+  var s = Math.max(0, Math.round((Date.parse(now) - Date.parse(then)) / 1000));
+  if (s < 60) return s + "s";
+  var m = Math.floor(s / 60);
+  if (m < 60) return m + "m " + (s % 60) + "s";
+  var h = Math.floor(m / 60);
+  if (h < 24) return h + "h " + (m % 60) + "m";
+  return Math.floor(h / 24) + "d " + (h % 24) + "h";
+}
+// agoFull keeps the seconds at every magnitude, and reports the total as
+// well. Uptime is the one figure on this page everything else is measured
+// from, so rounding it to the nearest minute throws away the number you would
+// use to check any of the others by hand.
+function agoFull(then, now) {
+  // secs() owns the zero-time sentinel; three copies of it would be three
+  // places to change if that encoding ever moves.
+  var s = secs(then, now);
+  if (s === Infinity) return { pretty: "never", total: 0 };
+  s = Math.round(s);
+  var d = Math.floor(s / 86400), h = Math.floor(s / 3600) % 24;
+  var m = Math.floor(s / 60) % 60, sec = s % 60;
+  var out = [];
+  if (d) out.push(d + "d");
+  if (d || h) out.push(h + "h");
+  if (d || h || m) out.push(m + "m");
+  out.push(sec + "s");
+  return { pretty: out.join(" "), total: s };
+}
+function secs(then, now) {
+  if (!then || then.indexOf("0001-") === 0) return Infinity;
+  return Math.max(0, (Date.parse(now) - Date.parse(then)) / 1000);
+}
+
+// A pool's deviation in standard deviations, turned into the one word the UI
+// colours by. Inside one sigma is ordinary luck and must NOT be flagged --
+// with three pools somebody is always below the mean, and calling that a
+// problem trains you to ignore the colour.
+function grade(p) {
+  if (!p.sigmaPct) return "none";
+  var s = Math.abs(p.sigmas || 0);
+  if (s <= 1) return "ok";
+  if (s <= 2) return "warn";
+  return "bad";
+}
+
+function motionOn() {
+  var m = document.documentElement.getAttribute("data-motion");
+  if (m === "on") return true;
+  if (m === "off") return false;
+  return !(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+}
+
+// ---- node construction (once) ----------------------------------------------
+//
+// Nodes are built once and mutated in place. Rebuilding them each poll would
+// restart every CSS animation on every tick, which is exactly what the
+// rotation animation needs to stand out against.
+var built = false;
+var nodes = { rigs: {}, pools: {}, ports: {}, hub: null };
+var lastBinding = {};
+var lastRotations = -1;
+
+function build(d) {
+  var rigs = $("colRigs"), hub = $("colHub"), gws = $("colGws"), pools = $("colPools");
+  rigs.textContent = ""; hub.textContent = ""; gws.textContent = ""; pools.textContent = "";
+  nodes = { rigs: {}, gws: {}, pools: {}, ports: {}, hub: null };
+
+  rigs.appendChild(el("div", "colhead", "Rigs"));
+  d.rigs.forEach(function (r, i) {
+    var n = el("div", "node");
+markOf(n, "<p><b>A physical miner.</b> It connects to switchyard on its own "
+      + "dedicated port and never talks to a gateway directly.</p>"
+      + "<p>That indirection is the whole design: the rig is configured once "
+      + "and never reconfigured, while switchyard moves which pool its work "
+      + "reaches.</p>");
+    n.appendChild(el("div", "n", r.name));
+    var now = el("div", "m"), avg = el("div", "m"), where = el("div", "m"), who = el("div", "m");
+    n.appendChild(now); n.appendChild(avg); n.appendChild(where); n.appendChild(who);
+    rigs.appendChild(n);
+    // Keyed by INDEX, not name. A rig's name is learned from its miner and
+    // changes the moment one connects -- "port 23401" becomes "09864e88" --
+    // so a name-keyed lookup silently misses from then on, and every link
+    // belonging to that rig quietly stops being drawn. The index is what is
+    // actually stable.
+    nodes.rigs[i] = { box: n, now: now, avg: avg, where: where, who: who };
+  });
+
+  hub.appendChild(el("div", "colhead", "Stratum proxy"));
+  var h = el("div", "node hub");
+  h.appendChild(el("div", "n", "switchyard"));
+  var hm = el("div", "m");
+  h.appendChild(hm);
+  h.appendChild(el("div", "sep"));
+  d.rigs.forEach(function (r, i) {
+    var row = el("div", "port");
+markOf(row, "<p><b>Listener for " + r.name + ".</b> Point that miner here and leave "
+      + "it there; switchyard decides which gateway it reaches.</p>");
+    row.appendChild(el("span", "p", r.listen.replace(/^0\.0\.0\.0/, "")));
+    row.appendChild(el("span", "arrow", "→"));
+    var to = el("span", "to");
+    row.appendChild(to);
+    h.appendChild(row);
+    nodes.ports[i] = { row: row, to: to };
+  });
+  h.appendChild(el("div", "sep"));
+  var hm2 = el("div", "m");
+  h.appendChild(hm2);
+  hub.appendChild(h);
+  nodes.hub = { box: h, line1: hm, line2: hm2 };
+
+  // The gateways carry every measured number, because every measured number is
+  // a fact about switchyard's own socket to them.
+  gws.appendChild(el("div", "colhead", "DATUM gateways"));
+  d.pools.forEach(function (p, j) {
+    var n = el("div", "node");
+markOf(n, "<p><b>A DATUM gateway</b> running on this machine. This is what "
+      + "switchyard actually connects to — it never speaks to a pool.</p>"
+      + "<p>Switchyard holds a session open to every one of these at all times. "
+      + "Only one carries work at a moment; the rest are warm and ready, which "
+      + "is what makes a rotation cost a reconnect rather than a fresh "
+      + "handshake with the pool.</p>"
+      + "<p>Every figure on this card — difficulty, accepted, rejected, "
+      + "hashrate — is measured on that socket. It is what switchyard can "
+      + "see. What the gateway then forwards is the gateway's business.</p>");
+    n.appendChild(el("div", "n", p.gateway || p.name));
+    n.appendChild(el("div", "gwaddr", p.addr || ""));
+    var occ = el("div", "m"), now = el("div", "m"), diff = el("div", "m"), sh = el("div", "m");
+    n.appendChild(occ); n.appendChild(now); n.appendChild(diff); n.appendChild(sh);
+    gws.appendChild(n);
+    // By index, like the rigs and for the same reason: a pool's displayed
+    // name is the gateway's coinbase tag, which arrives after the node was
+    // built and can change under it. A name-keyed lookup would silently miss
+    // from that moment on.
+    nodes.gws[j] = { box: n, occ: occ, now: now, diff: diff, sh: sh };
+  });
+
+  // The pools carry only what an operator told us plus the long-run share,
+  // which is the one pool-level question switchyard is entitled to answer:
+  // over time, is each of these getting an even cut of the work.
+  pools.appendChild(el("div", "colhead", "Pools"));
+  d.pools.forEach(function (p, j) {
+    var n = el("div", "node pool");
+markOf(n, "<p><b>The pool behind that gateway</b> — and the one thing on this "
+      + "page switchyard cannot see.</p>"
+      + "<p>DATUM owns this hop. It holds its own authenticated session with "
+      + "the pool, builds its own templates, and decides what to forward. "
+      + "Switchyard's job ends one box to the left.</p>"
+      + "<p>So there is no hashrate on the connecting line: switchyard would "
+      + "be guessing. The average shown here is derived from work switchyard "
+      + "handed the gateway, which is the closest honest statement available "
+      + "— and it is what the fairness band below is measuring.</p>"
+      + "<p>The name and address are labels from "
+      + "<span class=\"k\">config.json</span>, not anything discovered.</p>");
+    n.appendChild(el("div", "n", p.name));
+    var host = el("div", "m"), avg = el("div", "m"), health = el("div", "m");
+    n.appendChild(host); n.appendChild(avg); n.appendChild(health);
+    pools.appendChild(n);
+    nodes.pools[j] = { box: n, host: host, avg: avg, health: health };
+  });
+
+  // Both columns are told the same row count, which is what keeps gateway N
+  // and pool N on the same baseline and their connector horizontal.
+  gws.style.setProperty("--rows", d.pools.length);
+  pools.style.setProperty("--rows", d.pools.length);
+
+  built = true;
+}
+
+// setMeta rebuilds one metadata line from parts. Strings become text nodes and
+// objects become elements, so a value can be coloured without ever building
+// markup from a string.
+// setClass writes className only when it differs.
+//
+// Assigning the same value still counts as a change to the style engine in
+// one way that matters: any CSS transition on that element restarts. The node
+// boxes carry "transition: border-color .6s", so rewriting their class on
+// every two-second poll left twenty-nine border-colour transitions
+// permanently mid-flight -- interpolating colours that were not changing,
+// forever, and repainting each node to do it. Confirmed with
+// document.getAnimations(), which should be quiet on an idle dashboard and
+// was not.
+function setClass(node, v) {
+  if (node && node.className !== v) node.className = v;
+}
+
+// markOf holds a marker's help text on the ELEMENT rather than in an
+// attribute, and only when it has actually changed.
+//
+// These are paragraphs of explanatory prose -- twenty-one of them, several
+// hundred characters each -- and they were being written into data-mark on
+// every poll. Two costs came with that. Writing an attribute that a selector
+// mentions ("[data-mark] { cursor: help }") invalidates that element's style
+// whether or not the value differs, and the strings themselves were being
+// rebuilt and re-serialised into the DOM thirty times a minute to say exactly
+// what they said before.
+//
+// The attribute is now set once, empty, purely so the selector and the wiring
+// sweep can still find the element. The text lives on a plain property.
+function markOf(node, html) {
+  if (!node) return;
+  if (node.__mark === html) return;
+  node.__mark = html;
+  if (node.dataset.mark !== "") node.dataset.mark = "";
+}
+
+// setMeta rebuilds a line of node text -- but only when that line differs.
+//
+// It clears and recreates its children, which is the right shape for content
+// that changes and pure churn for content that does not. Most of these lines
+// are identical from one poll to the next.
+function setMeta(node, parts) {
+  var sig = JSON.stringify(parts);
+  if (node.__metaSig === sig) return;
+  node.__metaSig = sig;
+  node.textContent = "";
+  parts.forEach(function (p) {
+    if (typeof p === "string") { node.appendChild(document.createTextNode(p)); return; }
+    node.appendChild(el(p.tag || "b", p.cls, p.text));
+  });
+}
+
+function update(d) {
+  d.rigs.forEach(function (r, i) {
+    var n = nodes.rigs[i];
+    if (!n) return;
+    // The heading is rewritten each poll now: the name arrives from the miner
+    // after the node was built, so a name painted once at construction would
+    // read "port 23401" forever.
+    var heading = n.box.querySelector(".n");
+    if (heading && heading.textContent !== r.name) heading.textContent = r.name;
+
+    setMeta(n.now, [{ text: ths(r.nowThs) }, " TH/s now"]);
+markOf(n.now, "<p><b>Right now.</b> Measured from accepted-share difficulty over the "
+      + "last few minutes.</p>"
+      + "<p>Expect it to wander. A rig lands a share every half minute or so, "
+      + "so a short window is mostly Poisson noise even when nothing is "
+      + "wrong — the average below is the steadier number.</p>");
+    // Switchyard replaces the username the miner offers. That is unavoidable
+    // -- the upstream sessions are authorised before any miner exists -- but
+    // an invisible substitution is indistinguishable from a hostile one, so
+    // both names are published and a mismatch is called out rather than buried.
+    var sent = (r.gateways && r.gateways.length) ? r.gateways[0].authorisedAs : r.name;
+    if (!r.claimedUser) {
+      setMeta(n.who, [{ tag: "span", cls: "sentinel", text: "sends " + sent + " upstream" }]);
+    } else if (r.claimedUser === sent) {
+      setMeta(n.who, [{ tag: "span", cls: "ok", text: "✓" }, " authorised as " + sent]);
+    } else {
+      setMeta(n.who, [
+        { tag: "span", cls: "warn", text: "renamed" }, " ",
+        { tag: "span", cls: "sentinel", text: r.claimedUser }, " → " + sent
+      ]);
+    }
+markOf(n.who, "<p><b>Who this rig is upstream.</b> The miner asked to authorise as "
+      + (r.claimedUser ? "<span class=\"k\">" + r.claimedUser + "</span>"
+                       : "<i>nothing yet</i>")
+      + "; switchyard sent <span class=\"k\">" + sent + "</span> to the gateway.</p>"
+      + (r.claimedUser && r.claimedUser !== sent
+          ? "<p><b>These differ.</b> Not necessarily wrong — the name in "
+            + "config.json is what switchyard uses, deliberately, so one rig "
+            + "keeps one identity across every pool it rotates through. But if "
+            + "you did not intend it, the pool is crediting a worker you did "
+            + "not name.</p>"
+          : "<p>Shown because switchyard <b>replaces</b> this value rather than "
+            + "forwarding it: the upstream sessions are authorised before any "
+            + "miner connects, so there is nothing else it could do. A proxy "
+            + "that renames you silently is exactly what a hostile one would "
+            + "do, so it is stated here instead.</p>")
+      + "<p>Where the money goes is a separate question, decided by the gateway "
+      + "and the pool — not by this name. Your pool's own dashboard is the "
+      + "only place that is genuinely verifiable.</p>");
+
+    setMeta(n.avg, [{ tag: "span", text: ths(r.ths) + " TH/s avg" }]);
+markOf(n.avg, "<p><b>Average over the whole run</b>, across every pool this rig has "
+      + "visited.</p>"
+      + "<p>Unlike the per-pool figures, this one is not divided by anything: "
+      + "a rig is always on <i>some</i> pool, so this is simply what the "
+      + "hardware has been doing.</p>");
+    var st = rigState(r);
+    n.where.textContent = r.connected
+      ? (r.listen.replace(/^0\.0\.0\.0/, "") + " → " + (r.boundTo || "unbound"))
+      : (st === "arriving"
+          ? r.listen.replace(/^0\.0\.0\.0/, "") + " · " + waitLabel(r)
+          : "miner not connected");
+    setClass(n.box, "node " + (st === "live" ? "live" : st === "arriving" ? "arriving" : "offline"));
+  });
+
+  var carrying = 0;
+  d.pools.forEach(function (p) { if (p.occupants.length) carrying++; });
+  nodes.hub.line1.textContent = d.rigs.length + " rigs × " + d.pools.length + " gateways · "
+    + (d.rigs.length * d.pools.length) + " sessions held open";
+  nodes.hub.line2.textContent = "rig i → pool (i+t) mod " + d.pools.length
+    + " · " + carrying + " carrying, " + (d.pools.length - carrying) + " dark";
+
+  d.rigs.forEach(function (r, i) {
+    var pr = nodes.ports[i];
+    if (!pr) return;
+    pr.to.textContent = r.boundTo || "unbound";
+    setClass(pr.to, "to" + (r.boundTo ? "" : " none"));
+  });
+
+  d.pools.forEach(function (p, j) {
+    var n = nodes.gws[j];
+    if (!n) return;
+
+    if (p.occupants.length) {
+      setMeta(n.occ, [{ tag: "span", text: p.occupants.join(", ") }]);
+markOf(n.occ, "<p><b>The rig currently bound to this gateway.</b> Its work is "
+        + "reaching this gateway and no other.</p>");
+    } else {
+      setMeta(n.occ, [{ tag: "span", cls: "sentinel", text: "no rig this block" }]);
+markOf(n.occ, "<p><b>No rig is on this gateway right now</b>, and that is the scheme "
+        + "working rather than a fault.</p>"
+        + "<p>With fewer rigs than gateways, one is always dark. It takes its "
+        + "turn on the next rotation — which is exactly why the fairness "
+        + "band below counts rotations rather than shares.</p>");
+    }
+
+    var gwHeading = n.box.querySelector(".n");
+    if (gwHeading && gwHeading.textContent !== (p.gateway || p.name)) {
+      gwHeading.textContent = p.gateway || p.name;
+    }
+
+    setMeta(n.now, [{ text: ths(p.nowThs) }, " TH/s now"]);
+markOf(n.now, "<p><b>What switchyard is handing this gateway at this instant</b>, over "
+      + "the last " + Math.round((d.rateWindowSecs || 300) / 60) + " minutes.</p>"
+      + "<p><b>Zero is normal.</b> It means no rig is bound here right now, "
+      + "which is true of at least one gateway at all times. It is a statement "
+      + "about placement, not about health.</p>");
+
+    if (p.ready) {
+      setMeta(n.diff, [{ text: num(p.difficulty) }, " share difficulty"]);
+markOf(n.diff, "<p>The share difficulty <b>this gateway</b> has assigned, via its own "
+        + "vardiff. Switchyard does not choose it and does not argue with it "
+        + "— it passes it through to whichever rig is bound here.</p>"
+        + "<p>Gateways commonly sit at different values, which is why work is "
+        + "summed as difficulty rather than counted as shares everywhere on "
+        + "this page.</p>");
+    } else {
+      setMeta(n.diff, [{ tag: "span", cls: "off", text: "not connected" }]);
+markOf(n.diff, "<p><b>Switchyard cannot reach this gateway.</b> It retries "
+        + "continuously; a rig scheduled here will fall back to another "
+        + "gateway rather than idle.</p>"
+        + "<p>Check that the container is up and that the address on this card "
+        + "is the one it listens on.</p>");
+    }
+
+    setMeta(n.sh, [
+      { text: num(p.accepted) }, " accepted · ",
+      { tag: "span", cls: p.rejected > p.accepted ? "off" : "", text: num(p.rejected) }, " rejected"
+    ]);
+markOf(n.sh, "<p>Shares this gateway <b>accepted</b> and <b>rejected</b> from any of "
+      + "your rigs, since the last reset.</p>"
+      + "<p>A handful of rejects is ordinary: at every rotation a few shares "
+      + "are already in flight when the job moves on, and they land too late. "
+      + "Rejects climbing steadily while accepts do not is the shape worth "
+      + "acting on.</p>");
+
+    var cls = "node ";
+    if (!p.ready) cls += "offline";
+    else if (p.occupants.length) cls += "live";
+    else cls += "dark";
+    // Preserve a running arrive/depart animation: className is rewritten every
+    // poll, and stomping the class mid-animation would cut it short.
+    if (n.box.classList.contains("arrive")) cls += " arrive";
+    if (n.box.classList.contains("depart")) cls += " depart";
+    setClass(n.box, cls);
+  });
+
+  // The pool column. Two lines only, and one of them is frequently an admission
+  // of ignorance -- which is the honest state of affairs and worth showing as
+  // such rather than padding out with numbers borrowed from the gateway.
+  d.pools.forEach(function (p, j) {
+    var n = nodes.pools[j];
+    if (!n) return;
+    // The name is the gateway's tag and arrives after the node was built.
+    var poolHeading = n.box.querySelector(".n");
+    if (poolHeading && poolHeading.textContent !== p.name) poolHeading.textContent = p.name;
+
+    setMeta(n.host, p.host
+      ? [{ tag: "span", text: p.host }]
+      : [{ tag: "span", cls: "unknown", text: "pool not identified" }]);
+markOf(n.host, p.host
+      ? "<p>The pool this gateway is connected to.</p>"
+        + "<p>Switchyard cannot see it directly — DATUM owns that session "
+        + "— so this came from the gateway's own status page, read once "
+        + "when you pressed <b>Inspect</b>, or was typed into "
+        + "<span class=\"k\">config.json</span> by hand. It is a label: nothing "
+        + "routes on it, and switchyard does not re-check it.</p>"
+      : "<p>Switchyard has <b>no way to discover</b> which pool sits behind a "
+        + "gateway on its own. DATUM holds that session, not switchyard.</p>"
+        + "<p>The gateway will say, though. Open <b>CONFIGURE</b>, give this "
+        + "pool its gateway status-page address, and press <b>Inspect</b>.</p>");
+
+    var g = grade(p);
+    setMeta(n.avg, [
+      { tag: "span", cls: g, text: ths(p.ths) },
+      " avg vs ",
+      { tag: "span", text: ths(p.expectedThs) },
+      " expected"
+    ]);
+markOf(n.avg, "<p><b>Long-run average</b> since this process started, against the even "
+      + "split it should converge to. Coloured by the same rule as the bars "
+      + "below.</p>"
+      + "<p>Strictly this measures work handed to the <b>gateway</b> in front "
+      + "of this pool. That is as close as switchyard can honestly get, and it "
+      + "is the right number for the question being asked — the rotation "
+      + "is the only thing that decides how the work is divided.</p>"
+      + (p.sigmaPct
+          ? ("<p>Currently <span class=\"k\">"
+             + (p.sigmas >= 0 ? "+" : "−") + Math.abs(p.sigmas).toFixed(1)
+             + "σ</span> from the ideal, against a band of <span "
+             + "class=\"k\">±" + p.sigmaPct.toFixed(2) + " pts</span>. "
+             + (Math.abs(p.sigmas) <= 1
+                ? "Well inside ordinary scheduling luck."
+                : (Math.abs(p.sigmas) <= 2
+                   ? "Further out than usual, but not yet unusual enough to mean anything."
+                   : "Far enough out to be worth a look at the gateway.")) + "</p>")
+          : "<p>Not enough rotations yet to say whether that gap is real. Every "
+            + "pool needs at least one turn before the band means anything.</p>"));
+
+    // The pool-side counters, read from the gateway's own status page. This
+    // is the only place one specific failure is visible: a gateway can accept
+    // every share locally while the pool rejects every one of them, and
+    // nothing switchyard measures itself would look wrong.
+    var h = p.health;
+    if (!h) {
+      setMeta(n.health, [{ tag: "span", cls: "unknown", text: "pool-side result unknown" }]);
+markOf(n.health, "<p>Switchyard does not know whether the <b>pool</b> is accepting this "
+        + "gateway's work — only that the gateway is accepting yours.</p>"
+        + "<p>Those are different questions, and the gap between them is a real "
+        + "failure mode: a misconfigured gateway accepts every share locally "
+        + "while the pool rejects all of them, and nothing on this page would "
+        + "look wrong.</p>"
+        + "<p>Give this pool its gateway status-page address in <b>CONFIGURE</b> "
+        + "and the pool-side counters appear here.</p>");
+    } else if (h.error) {
+      setMeta(n.health, [{ tag: "span", cls: "warn", text: "gateway page unreachable" }]);
+markOf(n.health, "<p>Could not read the gateway's status page:</p>"
+        + "<p><span class=\"k\">" + h.error + "</span></p>"
+        + "<p>Mining is unaffected — this page is only read for reporting.</p>");
+    } else {
+      var tot = (h.poolAccepted || 0) + (h.poolRejected || 0);
+      var bad = tot >= 5 && (h.poolRejected || 0) > (h.poolAccepted || 0);
+      setMeta(n.health, [
+        { tag: "span", cls: bad ? "off" : "ok", text: num(h.poolAccepted || 0) },
+        " taken by pool · ",
+        { tag: "span", cls: (h.poolRejected || 0) > 0 ? "warn" : "", text: num(h.poolRejected || 0) },
+        " refused"
+      ]);
+markOf(n.health, "<p><b>What the POOL did with the work</b>, from the gateway's own "
+        + "status page — not from switchyard.</p>"
+        + "<p>The counters above this line are the gateway accepting your "
+        + "shares. These are the pool accepting the gateway's. They are "
+        + "different questions and they can disagree completely.</p>"
+        + (bad
+            ? "<p><b>This pool is refusing most of what it is sent</b>, while "
+              + "the gateway and this dashboard both report everything as "
+              + "accepted. Work these two in order:</p>"
+              + "<p><b>1. Is <span class=\"k\">pool_pass_full_users</span> "
+              + "false</b> on this gateway? It is the DATUM default and it is "
+              + "what switchyard requires. With it true, the pool is credited "
+              + "by whatever your miner sends as a username — and a worker "
+              + "name is not a payout address, so every share is refused. "
+              + "Measured behaviour is exactly 100% rejection.</p>"
+              + "<p><b>2. If you must leave it true</b>, your miner's username "
+              + "has to be your payout address for <i>this</i> pool, in the "
+              + "form <span class=\"k\">address.worker</span> — set on the "
+              + "miner itself. Switchyard forwards what the miner sends and "
+              + "will not edit an address on your behalf.</p>"
+              + "<p>Setting the flag back to false restores acceptance on the "
+              + "very next share; nothing else needs changing.</p>"
+            : "<p>A handful of refusals is ordinary — shares in flight when "
+              + "a gateway reconnects land too late. Refusals outrunning "
+              + "acceptances is not.</p>")
+        + (h.status ? "<p>Gateway reports: <span class=\"k\">" + h.status + "</span></p>" : ""));
+    }
+    setClass(n.box, "node pool" + (p.occupants.length ? " live" : "")
+      + (h && !h.error && (h.poolAccepted || 0) + (h.poolRejected || 0) >= 5
+         && (h.poolRejected || 0) > (h.poolAccepted || 0) ? " offline" : ""));
+  });
+}
+
+// ---- connectors ------------------------------------------------------------
+function anchor(rect, host, toward) {
+  var horizontal = Math.abs(toward.left - rect.left) > Math.abs(toward.top - rect.top);
+  if (horizontal) {
+    var right = toward.left > rect.left;
+    return { x: (right ? rect.right : rect.left) - host.left, y: rect.top + rect.height / 2 - host.top, h: true };
+  }
+  var below = toward.top > rect.top;
+  return { x: rect.left + rect.width / 2 - host.left, y: (below ? rect.bottom : rect.top) - host.top, h: false };
+}
+
+function curve(a, b) {
+  if (a.h) {
+    var dx = (b.x - a.x) * 0.45;
+    return "M" + a.x + "," + a.y + " C" + (a.x + dx) + "," + a.y + " " + (b.x - dx) + "," + b.y + " " + b.x + "," + b.y;
+  }
+  var dy = (b.y - a.y) * 0.45;
+  return "M" + a.x + "," + a.y + " C" + a.x + "," + (a.y + dy) + " " + b.x + "," + (b.y - dy) + " " + b.x + "," + b.y;
+}
+
+var pathSeq = 0;
+
+// linkSig is everything about the diagram that changes its SHAPE: the size of
+// the area, which rigs exist and are connected, and where each is bound. The
+// numbers written along the links are deliberately absent -- they change on
+// every poll and they do not move a single pixel of the drawing.
+// hasEntries: a rotation just landed, so the diagram must be rebuilt even if
+// the signature has not caught up yet.
+function hasEntries(entered) {
+  for (var k in entered) { if (entered[k]) return true; }
+  return false;
+}
+
+// The only thing a steady-state poll needs to change in the diagram.
+function refreshLinkLabels(d) {
+  if (!linkLabels.length) return;
+  var vals = {};
+  d.rigs.forEach(function (r) {
+    vals["rig:" + r.name] = ths(r.nowThs) + " TH/s";
+    r.gateways.forEach(function (g) {
+      vals["gw:" + r.name + ":" + g.pool] = ths(g.nowThs) + " TH/s";
+    });
+  });
+  linkLabels.forEach(function (l) {
+    var v = vals[l.key];
+    // Written only when it differs. An identical assignment still counts as a
+    // mutation and still costs a repaint of the text.
+    if (v !== undefined && l.el.textContent !== v) l.el.textContent = v;
+  });
+}
+
+function linkSig(d, host) {
+  var parts = [Math.round(host.width), Math.round(host.height), motionOn() ? 1 : 0];
+  d.rigs.forEach(function (r) { parts.push(r.name, r.connected ? 1 : 0, r.boundTo || ""); });
+  d.pools.forEach(function (p) { parts.push(p.name, p.occupants.length > 0 ? 1 : 0); });
+  return parts.join("|");
+}
+var lastLinkSig = null;
+// The labels, kept so they can be refreshed without touching anything else.
+var linkLabels = [];
+
+// travelAlong moves a node along a path using CSS motion rather than SMIL.
+//
+// SMIL (<animateMotion> + <mpath>) is legacy, runs on the main thread, and --
+// the reason it had to go -- Chrome re-resolves the animation timeline of the
+// whole SVG fragment whenever that fragment is mutated. This page rewrites the
+// hashrate labels inside that same <svg> on every poll, so a two-second timer
+// was quietly triggering a timeline rebuild two seconds apart, off the JS
+// stack and invisible to any measurement taken from inside render().
+//
+// offset-path is the modern equivalent: the animation is declarative, the
+// engine can hand it to the compositor, and mutating a sibling text node does
+// not touch it.
+function travelAlong(el, dstr) {
+  el.style.offsetPath = "path('" + dstr + "')";
+  el.style.offsetRotate = "0deg";
+  el.style.animation = "travel 5.6s linear infinite";
+}
+
+function drawLinks(d, entered, force) {
+  var host = $("flow").getBoundingClientRect();
+  // A folded section has no geometry: every rect is zero, so every connector
+  // would be drawn from the origin to the origin and the whole diagram would
+  // have to be rebuilt on open anyway. Skip it and redraw on toggle.
+  if (host.width === 0 || host.height === 0) return;
+
+  // NOTHING MOVED: refresh the numbers and leave the drawing alone.
+  //
+  // Rebuilding this unconditionally every two seconds was the most expensive
+  // thing on the page by a wide margin, and almost all of it was waste. Each
+  // rebuild threw away and recreated a SMIL <animateMotion> per active link --
+  // which restarts Chrome's animation timeline, and visibly snapped every
+  // travelling pulse back to the start of its path twice a minute -- and
+  // called getTotalLength()/getPointAtLength() on every labelled path, each of
+  // which forces synchronous SVG geometry. The diagram itself changes only on
+  // a rotation, a connect, a disconnect or a resize.
+  var sig = linkSig(d, host);
+  if (!force && sig === lastLinkSig && !hasEntries(entered)) {
+    refreshLinkLabels(d);
+    return;
+  }
+  lastLinkSig = sig;
+  linkLabels = [];
+
+  var s = $("links");
+  // CANCEL BEFORE DISCARDING.
+  //
+  // Removing an animated element does not stop its animation. A CSS animation
+  // or a Web Animations object outlives the node it was attached to until the
+  // node is collected, and a page left open for hours rebuilds this diagram
+  // on every rotation -- so the running-animation count climbed all day while
+  // the visible animation count stayed at six. That is the shape of the
+  // degradation reported here: fine on a fresh tab, progressively worse on an
+  // old one, and invisible to any single-sample measurement.
+  if (s.getAnimations) {
+    s.getAnimations({ subtree: true }).forEach(function (a) { a.cancel(); });
+  }
+  s.textContent = "";
+  s.setAttribute("viewBox", "0 0 " + host.width + " " + host.height);
+  $("fx").setAttribute("viewBox", "0 0 " + host.width + " " + host.height);
+
+  // SVG has no z-index: paint order IS stack order, so whatever is appended
+  // last sits on top. Active links are therefore collected and re-appended at
+  // the end, because a dashed grey line lying across the one line actually
+  // carrying work is noise obscuring signal, which is exactly backwards.
+  var deferred = [];
+
+  function add(fromEl, toEl, active, label, labelAt, labelKey) {
+    var fr = fromEl.getBoundingClientRect(), tr = toEl.getBoundingClientRect();
+    var a = anchor(fr, host, tr), b = anchor(tr, host, fr);
+    var dstr = curve(a, b);
+    var id = "lp" + (++pathSeq);
+    var p = svgEl("path", { d: dstr, id: id, "class": "link " + (active ? "active" : "idle") });
+    s.appendChild(p);
+
+    var extras = [];
+    if (active && motionOn()) {
+      // Half speed. A pulse that crosses the diagram in under three seconds
+      // reads as a flicker at the edge of vision rather than work moving.
+      var c = svgEl("circle", { r: 3.2, "class": "pulse" });
+      travelAlong(c, dstr);
+      s.appendChild(c);
+      extras.push(c);
+    }
+
+    if (label) {
+      var at = p.getPointAtLength(p.getTotalLength() * (labelAt || 0.74));
+      var t = svgEl("text", {
+        x: at.x, y: at.y - 7,
+        "class": "linklabel" + (active ? " on" : ""),
+        "text-anchor": "middle"
+      });
+      t.textContent = label;
+      // Remembered by the key its value comes from, so the next poll can write
+      // the new number straight into it.
+      if (labelKey) linkLabels.push({ key: labelKey, el: t });
+      s.appendChild(t);
+      extras.push(t);
+    }
+    if (active) deferred.push([p].concat(extras));
+    return { path: p, d: dstr };
+  }
+
+  // Re-appending moves a node to the end of the child list, and therefore to
+  // the front of the painting.
+  //
+  // Sparks need no shepherding here: they live on the #fx overlay, which sits
+  // above this layer and is never cleared by a re-render.
+  function raiseActive() {
+    deferred.forEach(function (group) {
+      group.forEach(function (node) { s.appendChild(node); });
+    });
+  }
+
+  // Rig -> its own listener row. Anchoring at the port rather than at the
+  // switchyard box as a whole is what makes each rig's route followable.
+  d.rigs.forEach(function (r, i) {
+    var rn = nodes.rigs[i], pr = nodes.ports[i];
+    if (!rn || !pr) return;
+    add(rn.box, pr.row, r.connected, r.connected ? ths(r.nowThs) + " TH/s" : null, 0.5, "rig:" + r.name);
+  });
+
+  // Listener row -> every gateway. All of them, because all of them are open;
+  // the one carrying work is solid and the rest are dashed.
+  d.rigs.forEach(function (r, i) {
+    var pr = nodes.ports[i];
+    if (!pr) return;
+    d.pools.forEach(function (p) {
+      var gn = nodes.gws[d.pools.indexOf(p)];
+      if (!gn) return;
+      var on = r.boundTo === p.name;
+      var g = null;
+      for (var i = 0; i < r.gateways.length; i++) {
+        if (r.gateways[i].pool === p.name) g = r.gateways[i];
+      }
+      // Only the carrying link is labelled. Six labels for six links is noise,
+      // and the idle ones all read 0.00 by definition -- the gateway node
+      // states that far more legibly.
+      var link = add(pr.row, gn.box, on, (on && g) ? ths(g.nowThs) + " TH/s" : null, 0.72, "gw:" + r.name + ":" + p.name);
+      if (on && entered[p.name]) fireSpark(null, link.d);
+    });
+  });
+
+  // Gateway -> pool. THIS HOP IS NOT SWITCHYARD'S, and the drawing says so:
+  // its own muted style, no travelling pulse, and a caption naming who owns it
+  // instead of a hashrate. Switchyard has no socket here and no measurement to
+  // report; a teal line with "0.5 TH/s" on it would be a number invented to
+  // fill a gap.
+  d.pools.forEach(function (p, j) {
+    var gn = nodes.gws[j], pn = nodes.pools[j];
+    if (!gn || !pn) return;
+    var carrying = p.occupants.length > 0;
+    var fr = gn.box.getBoundingClientRect(), tr = pn.box.getBoundingClientRect();
+    var a = anchor(fr, host, tr), b = anchor(tr, host, fr);
+    var pid = "lp" + (++pathSeq);
+    var path = svgEl("path", {
+      d: curve(a, b), id: pid,
+      "class": "link beyond" + (carrying ? " on" : "")
+    });
+    s.appendChild(path);
+    // The last leg pulses too when it is carrying. Stopping the motion at the
+    // gateway made the diagram look like work arrived there and stopped,
+    // which is the opposite of what this column exists to say.
+    var extras = [];
+    if (carrying && motionOn()) {
+      var c = svgEl("circle", { r: 2.6, "class": "pulse beyond" });
+      travelAlong(c, curve(a, b));
+      s.appendChild(c);
+      extras.push(c);
+    }
+    var at = path.getPointAtLength(path.getTotalLength() * 0.5);
+    var t = svgEl("text", {
+      x: at.x, y: at.y - 7, "class": "linklabel beyond", "text-anchor": "middle"
+    });
+    t.textContent = "via DATUM";
+    s.appendChild(t);
+    extras.push(t);
+    if (carrying) deferred.push([path].concat(extras));
+  });
+
+  raiseActive();
+}
+
+function fireSpark(_ignored, dstr) {
+  if (!motionOn()) return null;
+  var layer = $("fx");
+  var p = svgEl("path", { d: dstr, "class": "spark" });
+  layer.appendChild(p);
+  var len = p.getTotalLength();
+  var head = len * 0.22;
+
+  // The travel runs from "entirely before the start" to "entirely past the
+  // end", so the spark is seen to LEAVE switchyard and then be ABSORBED by the
+  // gateway: its head reaches the box edge first and the tail is drawn in
+  // after it, rather than the whole thing winking out on arrival.
+  p.style.strokeDasharray = head + " " + len;
+  var a = p.animate(
+    [{ strokeDashoffset: head }, { strokeDashoffset: -len }],
+    { duration: 3600, easing: "cubic-bezier(.35,0,.2,1)", fill: "forwards" }
+  );
+  var gone = false;
+  function done() {
+    if (gone) return;
+    gone = true;
+    // Cancelled, not merely detached. fill:"forwards" keeps a finished
+    // animation alive and filling, and a rotation every few minutes for a day
+    // is a lot of them.
+    a.cancel();
+    if (p.parentNode) p.parentNode.removeChild(p);
+  }
+  a.onfinish = done;
+  // A timer as well as the finish handler, because a browser tab in the
+  // background throttles animations: onfinish may not arrive for minutes, and
+  // sparks would pile up unremoved on a dashboard somebody left open behind
+  // another window. Whichever fires first wins; done() is idempotent.
+  setTimeout(done, 4200);
+  return p;
+}
+
+// ---- rotation detection ----------------------------------------------------
+function bindingOf(d) {
+  var m = {};
+  d.pools.forEach(function (p) { m[p.name] = p.occupants.slice().sort().join(","); });
+  return m;
+}
+
+function detectRotation(d) {
+  var now = bindingOf(d), entered = {}, left = {};
+  for (var k in now) {
+    var was = lastBinding[k];
+    if (was === undefined || now[k] === was) continue;
+    if (now[k] !== "") entered[k] = true; else left[k] = true;
+  }
+  // The gateway is what a rig arrives at and departs from, so that is what
+  // flashes. The pool box behind it did not change state -- DATUM's session to
+  // it has been open the whole time.
+  // entered/left are keyed by pool NAME; the node maps are keyed by index.
+  var idxByName = {};
+  d.pools.forEach(function (p, j) { idxByName[p.name] = j; });
+  for (var e in entered) flash(nodes.gws[idxByName[e]], "arrive");
+  for (var l in left) flash(nodes.gws[idxByName[l]], "depart");
+
+  if (lastRotations >= 0 && d.rotations > lastRotations) {
+    var b = $("blockFlash");
+    b.textContent = "rotation #" + d.rotations;
+    b.classList.add("show");
+    clearTimeout(b._t);
+    b._t = setTimeout(function () { b.classList.remove("show"); }, 8000);
+  }
+  lastBinding = now;
+  lastRotations = d.rotations;
+  return entered;
+}
+
+function flash(n, cls) {
+  if (!n) return;
+  n.box.classList.remove(cls);
+  void n.box.offsetWidth; // restart rather than ignore a repeat
+  n.box.classList.add(cls);
+  // Long enough for both variants: the reduced-motion flash deliberately holds
+  // longer to make up for not moving.
+  setTimeout(function () { n.box.classList.remove(cls); }, 2700);
+}
+
+// zoneHelp is the explanation attached to each coloured region of a bar.
+//
+// Written per zone rather than once for the chart, because the useful question
+// is always "what does it mean that I am HERE", and the answer differs by
+// region in kind rather than degree.
+function zoneHelp(kind, p, evenThs, sigThs) {
+  var lo, hi;
+  if (kind === "ok") {
+    lo = evenThs - sigThs; hi = evenThs + sigThs;
+    return "<p><b>Within one standard deviation \u2014 ordinary.</b></p>"
+      + "<p><span class=\"k\">" + ths(lo) + " \u2013 " + ths(hi) + " TH/s</span> "
+      + "&middot; <span class=\"k\">"
+      + (p.expectedPct - p.sigmaPct).toFixed(2) + "% \u2013 "
+      + (p.expectedPct + p.sigmaPct).toFixed(2) + "%</span></p>"
+      + "<p>About two runs in three land in here. A pool ending in this zone "
+      + "is not being short-changed, it is being scheduled.</p>";
+  }
+  if (kind === "warn") {
+    return "<p><b>One to two standard deviations \u2014 further out than usual, "
+      + "but not yet unusual.</b></p>"
+      + "<p>Roughly one run in three reaches this zone at some point. Worth "
+      + "noticing, not worth acting on \u2014 and it narrows on its own as "
+      + "rotations accumulate.</p>";
+  }
+  return "<p><b>Beyond two standard deviations.</b></p>"
+    + "<p>About one run in twenty gets here by luck alone, so this is where an "
+    + "even split stops being a plausible explanation and a gateway that has "
+    + "been down, unreachable, or refusing work becomes the likelier one.</p>"
+    + "<p>Check that gateway's card above: its share difficulty, its accepted "
+    + "and rejected counts, and whether the pool behind it is taking the "
+    + "work.</p>";
+}
+
+// ---- share of work ---------------------------------------------------------
+function renderConv(d) {
+  var box = $("conv");
+  box.textContent = "";
+
+  // THE AXIS IS A WINDOW AROUND THE EVEN SPLIT, not a scale from zero.
+  //
+  // This is what makes the zones readable at all. A sigma here is a couple of
+  // percentage points against an even split of thirty-three, so on a 0-100
+  // axis the whole green/amber/red structure collapses into the last tenth of
+  // the bar and the thing this chart exists to show is invisible.
+  //
+  // Zero is not an interesting value here anyway. Nobody needs to see the
+  // distance from nothing to a third; they need to see the distance from where
+  // a pool is to where it stops being ordinary. So the window spans a few
+  // sigma either side of the ideal, widened if a pool has wandered outside it,
+  // and every bar starts at the window's left edge rather than at zero.
+  var even = d.pools.length ? 100 / d.pools.length : 1;
+  var sig = d.pools.length ? (d.pools[0].sigmaPct || 0) : 0;
+  var lo, hi;
+  if (sig > 0) {
+    var reach = 3.2 * sig;
+    d.pools.forEach(function (p) {
+      reach = Math.max(reach, Math.abs(p.sharePct - even) * 1.15);
+    });
+    lo = Math.max(0, even - reach);
+    hi = even + reach;
+  } else {
+    // No band yet: a plain scale, so the bars still say something.
+    var max = 0;
+    d.pools.forEach(function (p) { if (p.sharePct > max) max = p.sharePct; });
+    lo = 0;
+    hi = Math.max(max, even) * 1.12 || 1;
+  }
+  var pct = function (v) {
+    return Math.max(0, Math.min(100, ((v - lo) / (hi - lo)) * 100));
+  };
+
+  // Before a full cycle there is no band, and saying so is the honest label --
+  // a pool that has not had its turn is not behind, it is waiting.
+  // THREE cases, not two. With a single pool there is no band and there never
+  // will be one -- every share goes to the only destination there is, so the
+  // share of work is 100% by definition and has no spread to measure. The
+  // two-case version reported that as progress toward a threshold and counted
+  // it as "3 of 1 rotations", which is both wrong and unreachable.
+  $("convHint").textContent = d.pools.length < 2
+    ? "one pool — all work goes here, so there is nothing to compare"
+    : sig
+      ? ("±1σ = " + sig.toFixed(2) + " pts — the band narrows as "
+         + "rotations accumulate, and the axis zooms with it")
+      : ("no band until every pool has had a turn · " + d.rotations
+         + " of " + d.pools.length);
+  // Spelled out in the legend as well as on the marks, because the width of
+  // the band is the number that tells you how much this section currently
+  // knows -- and it is the first thing to check when a colour looks wrong.
+  $("legendVals").textContent = sig
+    ? ("1\u03c3 = \u00b1" + sig.toFixed(2) + " pts \u00b7 \u00b1"
+       + ths(d.totalThs * sig / 100) + " TH/s \u00b7 axis spans "
+       + lo.toFixed(1) + "\u2013" + hi.toFixed(1) + "% of total work")
+    : "";
+
+  d.pools.forEach(function (p) {
+    var row = el("div", "crow");
+    row.appendChild(el("div", "cname", p.name));
+
+    var bar = el("div", "bar");
+    var g = grade(p);
+    var evenThs = p.expectedThs;
+    var sigThs = d.totalThs * p.sigmaPct / 100;
+
+    // Zones first, so everything else paints over them. Drawn as a run of
+    // adjacent spans across the whole scale rather than as marks at the
+    // boundaries: the question this chart answers is "which region is the bar
+    // in", and a region is a thing you can see the edges of.
+    if (p.sigmaPct) {
+      var edges = [
+        [lo,                               p.expectedPct - 2 * p.sigmaPct, "bad"],
+        [p.expectedPct - 2 * p.sigmaPct,   p.expectedPct - p.sigmaPct,     "warn"],
+        [p.expectedPct - p.sigmaPct,       p.expectedPct + p.sigmaPct,     "ok"],
+        [p.expectedPct + p.sigmaPct,       p.expectedPct + 2 * p.sigmaPct, "warn"],
+        [p.expectedPct + 2 * p.sigmaPct,   hi,                             "bad"]
+      ];
+      edges.forEach(function (e) {
+        var a = pct(e[0]), b = pct(e[1]);
+        if (b <= a) return;
+        var z = el("div", "zone " + e[2]);
+        z.style.left = a + "%";
+        z.style.width = (b - a) + "%";
+        z.dataset.markid = p.name + ":zone" + e[2] + e[0].toFixed(2);
+markOf(z, zoneHelp(e[2], p, evenThs, sigThs));
+        bar.appendChild(z);
+      });
+    }
+
+    var got = el("div", "got" + (g === "none" ? "" : " " + g));
+    got.style.width = pct(p.sharePct) + "%";
+    got.dataset.markid = p.name + ":got";
+markOf(got, "<p><b>" + ths(p.ths) + " TH/s</b> \u2014 this pool's share of everything "
+      + "switchyard has placed so far, <span class=\"k\">"
+      + p.sharePct.toFixed(2) + "%</span> of the total.</p>"
+      + "<p>Deliberately uncoloured. The zone its tip lands in is the verdict; "
+      + "colouring the bar as well would say the same thing twice and hide how "
+      + "much room is left before the next boundary.</p>"
+      + "<p>The axis starts at <span class=\"k\">" + lo.toFixed(1) + "%</span>, "
+      + "not at zero \u2014 a standard deviation here is a couple of points "
+      + "against an even split of " + even.toFixed(1) + "%, so a scale from zero "
+      + "would squeeze every zone into the last tenth of the bar.</p>");
+    bar.appendChild(got);
+
+    var exp = el("div", "exp");
+    exp.style.left = pct(p.expectedPct) + "%";
+    exp.dataset.markid = p.name + ":even";
+markOf(exp, "<p><b>Even split</b> <span class=\"k\">" + p.expectedPct.toFixed(2) + "% \u00b7 "
+      + ths(evenThs) + " TH/s</span></p>"
+      + "<p>Where this pool would sit if the rotation were perfect and luck did "
+      + "not exist. It is a landmark, not a target: nothing is wrong with "
+      + "sitting off it, which is what the green zone either side is for.</p>");
+    bar.appendChild(exp);
+    row.appendChild(bar);
+
+    var n = el("div", "cnum");
+    n.appendChild(el("b", null, ths(p.ths) + " TH/s"));
+    n.appendChild(document.createTextNode(" of " + ths(p.expectedThs) + " \u00b7 "));
+    var dev = p.sharePct - p.expectedPct;
+    var dv = el("span", "dev " + g, p.sigmaPct
+      ? ((p.sigmas >= 0 ? "+" : "\u2212") + Math.abs(p.sigmas).toFixed(1) + "\u03c3")
+      : d.pools.length < 2 ? "all of it" : "no band yet");
+    dv.title = (dev >= 0 ? "+" : "\u2212") + Math.abs(dev).toFixed(2) + " points from an even split"
+      + (p.sigmaPct ? ", against a \u00b1" + p.sigmaPct.toFixed(2) + " point band" : "");
+    n.appendChild(dv);
+    row.appendChild(n);
+
+    box.appendChild(row);
+  });
+
+  // The axis, spelled out. Only when there is a band -- without one the scale
+  // is a plain 0-to-max and says nothing a reader needs.
+  if (sig > 0) {
+    var sc = el("div", "cscale");
+    sc.appendChild(el("div"));
+    var track = el("div", "track");
+    track.appendChild(el("span", "t lo", lo.toFixed(1) + "%"));
+
+    // THE EVEN SPLIT IS NOT THE MIDDLE OF THE AXIS.
+    //
+    // The window is even +/- 3.2 sigma, which looks symmetric and usually is
+    // -- but it is clamped at zero, because a share of total work cannot be
+    // negative. Early on sigma is enormous (tens of points), the left arm
+    // hits the clamp, and the window goes lopsided: 0% to 90.6% around an
+    // even split of 33.3%, which sits at 37% of the axis rather than 50%.
+    // A hardcoded 50% put the label a fifth of the axis away from the tick
+    // it names, and the discrepancy was largest exactly when the chart is
+    // least settled and most in need of being read carefully.
+    //
+    // pct() already maps a value to its position. Use it.
+    var mid = el("span", "t mid", even.toFixed(1) + "%");
+    mid.style.left = pct(even) + "%";
+    track.appendChild(mid);
+
+    track.appendChild(el("span", "t hi", hi.toFixed(1) + "%"));
+    sc.appendChild(track);
+    // The legend above already carries the sigma, its TH/s equivalent and the
+    // span, so this column stays empty rather than saying it again. It also
+    // used to report the span as "+/- (hi - even)", which is only true while
+    // the window is symmetric -- the very case the clamp breaks.
+    sc.appendChild(el("div"));
+    box.appendChild(sc);
+  }
+
+  // The bars are torn down and rebuilt on every poll, so the marks are new
+  // elements each time and need wiring again. wireHelp is idempotent, so this
+  // costs a querySelectorAll and nothing else.
+  wireAllHelp();
+  // The popover has to survive the rebuild, or the feature is unusable: the
+  // page polls every two seconds, so simply dismissing an orphaned popover
+  // means a mark can never be read for longer than that. Re-anchor instead --
+  // same mark, new element, freshly rendered numbers -- and only give up if
+  // the mark itself has genuinely gone.
+  if (helpOpener && !document.body.contains(helpOpener)) {
+    var id = helpOpener.dataset && helpOpener.dataset.markid;
+    var heir = id && box.querySelector('[data-markid="' + id + '"]');
+    if (heir) showHelpHTML(heir, helpBodyFor(heir)); else hideHelp();
+  }
+}
+
+// ---- outbound connections ------------------------------------------------
+//
+// Self-reported, and that is stated on the page rather than hidden. The value
+// is not the list itself but the fact that it can be checked: an honest
+// switchyard's rows match what the operating system reports, and a mismatch is
+// decisive without anyone reading a line of code.
+function renderOutbound(d) {
+  var body = $("obody");
+  body.textContent = "";
+  var conns = d.outbound || [];
+  var open = 0, dests = {};
+  conns.forEach(function (c) {
+    if (c.connected) { open++; dests[c.addr] = true; }
+    var tr = el("tr");
+    if (!c.connected) tr.className = "off";
+    tr.appendChild(el("td", null, c.addr));
+    tr.appendChild(el("td", null, c.resolved || "—"));
+    tr.appendChild(el("td", null, c.rig));
+    // Left aligned like every other column here. This table is a list of
+    // facts to scan, not a set of figures to compare down the column, so
+    // right-aligning one cell only broke the line the eye follows.
+    var age = el("td", null, c.connected ? ago(c.since, d.now) : "closed");
+    if (!c.connected) age.className = "stale";
+    tr.appendChild(age);
+    body.appendChild(tr);
+  });
+  var n = Object.keys(dests).length;
+  $("obFoot").textContent = conns.length
+    ? (open + " open to " + n + " destination" + (n === 1 ? "" : "s")
+       + ", all of them gateways from your config. Compare with "
+       + "`netstat -anp | grep switchyard` or `ss -tp`.")
+    : "No outbound connections.";
+}
+
+// ---- tables ----------------------------------------------------------------
+function renderTable(d) {
+  var body = $("tbody");
+  body.textContent = "";
+  d.rigs.forEach(function (r) {
+    var head = document.createElement("tr");
+    head.className = "rhead";
+    var c = document.createElement("td");
+    c.colSpan = 8;
+    c.appendChild(document.createTextNode(r.name + "  "));
+    var rst = rigState(r);
+    c.appendChild(el("span", rst === "live" ? "on" : rst === "arriving" ? "pending" : "off",
+      r.connected
+        ? "→ " + (r.boundTo || "unbound") + " · " + ths(r.nowThs) + " TH/s · " + r.listen
+        : (rst === "arriving" ? waitLabel(r) : "miner not connected") + " · " + r.listen));
+    head.appendChild(c);
+    body.appendChild(head);
+
+    r.gateways.forEach(function (g) {
+      var tr = document.createElement("tr");
+      if (g.pool === r.boundTo) tr.className = "bound";
+      var c0 = document.createElement("td");
+      c0.appendChild(el("span", "sdot " + (g.ready ? "up" : "down")));
+      c0.appendChild(document.createTextNode(g.pool));
+      tr.appendChild(c0);
+      tr.appendChild(el("td", null,
+        g.pool === r.boundTo ? "carrying this rig" : (g.ready ? "held open, idle" : "reconnecting")));
+      tr.appendChild(el("td", "num", g.ready ? num(g.difficulty) : "—"));
+      tr.appendChild(el("td", "num", ths(g.ths)));
+      tr.appendChild(el("td", "num", num(g.submitted)));
+      tr.appendChild(el("td", "num", num(g.accepted)));
+      tr.appendChild(el("td", "num", num(g.rejected)));
+      tr.appendChild(el("td", "num", ago(g.lastShare, d.now)));
+      body.appendChild(tr);
+    });
+  });
+}
+
+function renderPools(d) {
+  var body = $("pbody");
+  body.textContent = "";
+  var worst = 0, anySeen = false, never = [];
+
+  d.pools.forEach(function (p) {
+    var tr = document.createElement("tr");
+    if (p.occupants.length) tr.className = "bound";
+
+    var c0 = document.createElement("td");
+    c0.appendChild(el("span", "sdot " + (p.ready ? "up" : "down")));
+    c0.appendChild(document.createTextNode(p.name));
+    tr.appendChild(c0);
+
+    var c1 = document.createElement("td");
+    if (p.occupants.length) c1.textContent = p.occupants.join(", ");
+    else c1.appendChild(el("span", "sentinel", "no rig this block"));
+    tr.appendChild(c1);
+
+    tr.appendChild(el("td", "num", ths(p.nowThs)));
+    tr.appendChild(el("td", "num", num(p.accepted)));
+    tr.appendChild(el("td", "num", num(p.rejected)));
+
+    // A gap much longer than the dwell ceiling means we should have rotated
+    // back by now and have not. That is the only case worth colouring; a pool
+    // simply waiting its turn is the scheme working.
+    var s = secs(p.lastShare, d.now);
+    if (isFinite(s)) { anySeen = true; if (s > worst) worst = s; } else { never.push(p.name); }
+    var lastCell = el("td", "num", ago(p.lastShare, d.now));
+    if (s > (d.maxDwellSeconds || 900) * 1.5) lastCell.className = "num stale";
+    tr.appendChild(lastCell);
+
+    body.appendChild(tr);
+  });
+
+  // A pool that has NEVER seen a share this run is the more important case,
+  // and reporting only the longest FINITE wait would hide it completely --
+  // "never" is not a large number, it is absent from the arithmetic entirely.
+  if (never.length) {
+    $("poolCaption").textContent = "Not yet visited this run: " + never.join(", ") + ".";
+  } else if (anySeen) {
+    $("poolCaption").textContent =
+      "Longest any pool has waited for a share from you: " + Math.round(worst) + "s.";
+  } else {
+    $("poolCaption").textContent = " ";
+  }
+}
+
+// ---- main ------------------------------------------------------------------
+var latest = null;
+
+// setupPrompted stops the first-run form reopening itself every two seconds
+// if the operator closes it to go and look something up.
+var setupPrompted = false;
+
+function render(d) {
+  latest = d;
+  $("versionText").textContent = d.version || "dev";
+
+  // A reload that could not fully come up is the one condition the operator
+  // has to act on, and it is invisible otherwise -- the page would just show
+  // a rig that never connects.
+  var banner = $("reloadBanner");
+  banner.classList.toggle("show", !!d.reloadError);
+  if (d.reloadError) {
+    banner.textContent = "Last config reload did not fully start: " + d.reloadError
+      + " — open CONFIGURE to fix it.";
+  }
+
+  // Unconfigured is a state, not an error. Showing a dashboard of dashes over
+  // it would invite reading numbers that mean nothing yet.
+  var ready = d.configured !== false;
+  document.body.classList.toggle("unconfigured", !ready);
+  $("setupGate").classList.toggle("show", !ready);
+  if (!ready) {
+    // Which half is missing, rather than "nothing", which is wrong as soon as
+    // one of the two has been filled in and makes it look as though the work
+    // already done was discarded.
+    var nRigs = (d.rigs || []).length, nPools = (d.pools || []).length;
+    if (nPools && !nRigs) {
+      $("setupGateTitle").textContent = "No rigs yet";
+      $("setupGateLede").textContent = nPools === 1
+        ? "One pool is set up. Add at least one rig \u2014 switchyard assigns it a "
+          + "port, and you point a miner at that port."
+        : nPools + " pools are set up. Add at least one rig \u2014 switchyard "
+          + "assigns each one a port, and you point a miner at that port.";
+    } else if (nRigs && !nPools) {
+      $("setupGateTitle").textContent = "No pools yet";
+      $("setupGateLede").textContent =
+        "Add at least one DATUM gateway for those rigs to be sent to.";
+    } else {
+      $("setupGateTitle").textContent = "Nothing configured yet";
+      $("setupGateLede").textContent = "Switchyard moves miners between DATUM "
+        + "gateways so each pool gets an even share of your work. It needs at "
+        + "least one rig and one pool before it can do anything.";
+    }
+  }
+  if (!ready) {
+    if (!setupPrompted) {
+      setupPrompted = true;
+      openConfig(true);
+    }
+    return;
+  }
+  setupPrompted = false;
+
+  // MINERS RECONNECT ON THEIR OWN SCHEDULE, and this says so at the one moment
+  // it matters.
+  //
+  // A restart, a config apply or a rotation drops the miner's connection, and
+  // it comes back when its firmware decides to -- tens of seconds, sometimes
+  // minutes, staggered across rigs. During that window a correct setup is
+  // indistinguishable from a broken one, and the natural reading of a page
+  // full of red is that something needs fixing. So while any rig is inside the
+  // grace window the page says what it is doing and roughly how long it takes.
+  var arriving = (d.rigs || []).filter(function (r) { return rigState(r) === "arriving"; });
+  var wb = $("waitBanner");
+  wb.classList.toggle("show", arriving.length > 0 && !d.reloadError);
+  if (arriving.length) {
+    var names = arriving.map(function (r) { return r.name; }).join(", ");
+    // NOT rotations. A rotation drops the miner's connection too, but the
+    // listener it reconnects to is still there and accepts immediately, so
+    // the gap is a fraction of a second and never shows up here. The waits
+    // worth explaining are the ones where the port itself went away -- a
+    // restart or a config apply -- and the miner backs off before retrying.
+    // Listing rotations alongside them would have people bracing for a
+    // minute of downtime every few blocks, which is not what happens.
+    wb.textContent = "Waiting for " + names + " to connect. After a restart or "
+      + "a config change, miners reconnect on their own firmware's schedule "
+      + "— usually under a minute, sometimes two or three, and rarely all "
+      + "at once. Nothing needs doing unless this is still here in a few "
+      + "minutes.";
+  }
+
+
+  $("sTotal").textContent = ths(d.totalNowThs) + " TH/s";
+  $("sTotalAvg").textContent = ths(d.totalThs) + " TH/s average";
+  $("sRot").textContent = num(d.rotations);
+  // Measured, so it stays blank until there is something to measure. A zero
+  // here would read as "rotating is free", which it is not.
+  if (d.reconnects > 0) {
+    $("sCost").textContent = d.rotationCostPct.toFixed(2) + "%";
+    $("sCostSub").textContent = d.reconnectMeanSeconds.toFixed(1) + "s avg · "
+      + d.reconnectWorstSeconds.toFixed(1) + "s worst";
+  } else {
+    $("sCost").textContent = "—";
+    $("sCostSub").textContent = "no rotation timed yet";
+  }
+  $("sStep").textContent = "step " + d.step;
+  $("sDwell").textContent = ago(d.lastRotate, d.now);
+
+  var since = secs(d.lastRotate, d.now);
+  $("sNext").textContent = isFinite(since)
+    ? (since < d.minDwellSeconds
+        ? "next block held " + Math.ceil(d.minDwellSeconds - since) + "s"
+        : "forced in " + Math.max(0, Math.ceil(d.maxDwellSeconds - since)) + "s")
+    : " ";
+  $("sDwellRange").textContent = d.minDwellSeconds + "s – " + d.maxDwellSeconds + "s";
+  // THE TAIL, NOT THE HEAD. Every block hash starts with the same run of
+  // zeros -- that is what proof of work means -- so the leading characters
+  // carry no information, and they were spending the card's whole width to
+  // say nothing while the ellipsis ate the part that identifies the block.
+  $("sTip").textContent = d.lastPrevhash
+    ? "…" + d.lastPrevhash.slice(-12)
+    : "waiting for a job";
+  var up = agoFull(d.startedAt, d.now);
+  $("sUp").textContent = up.pretty;
+  $("sPoll").textContent = num(up.total) + "s · refresh every "
+    + d.pollSeconds + "s";
+
+  // Rebuild when the shape changes, not when a name does. Indexes are stable
+  // across a rename; a different number of rigs or pools is a different scene.
+  if (!built || Object.keys(nodes.rigs).length !== d.rigs.length
+      || Object.keys(nodes.gws).length !== d.pools.length) {
+    build(d);
+  }
+  update(d);
+  renderOutbound(d);
+  var entered = detectRotation(d);
+  drawLinks(d, entered);
+  renderConv(d);
+  renderTable(d);
+  renderPools(d);
+}
+
+// ---- frame timing, behind ?perf=1 ------------------------------------------
+//
+// Reports the two things that separate "the script is slow" from "drawing is
+// slow": long tasks, which are main-thread JS blocking for 50ms or more, and
+// gaps between animation frames, which catch a stall that JS never sees
+// because it happened during style, layout, paint or raster.
+//
+// If renders are single-digit milliseconds and frame gaps are still hundreds,
+// the cost is in painting what the render produced, not in producing it.
+var perfOn = /(\?|&)perf=1/.test(location.search);
+var perfLongTasks = [], perfGaps = [], perfRenders = [];
+var perfStart = Date.now(), perfFetchFails = 0;
+if (perfOn) {
+  $("perfHud").classList.add("show");
+  try {
+    new PerformanceObserver(function (l) {
+      l.getEntries().forEach(function (e) { perfLongTasks.push(Math.round(e.duration)); });
+      if (perfLongTasks.length > 40) perfLongTasks = perfLongTasks.slice(-40);
+    }).observe({ entryTypes: ["longtask"] });
+  } catch (e) { /* not every browser exposes long tasks */ }
+
+  (function frame(prev) {
+    requestAnimationFrame(function (t) {
+      if (prev) {
+        perfGaps.push(Math.round(t - prev));
+        if (perfGaps.length > 240) perfGaps = perfGaps.slice(-240);
+      }
+      frame(t);
+    });
+  })(0);
+
+  setInterval(function () {
+    var worstGap = perfGaps.length ? Math.max.apply(null, perfGaps) : 0;
+    var recent = perfGaps.slice(-90);
+    var janky = recent.filter(function (g) { return g > 50; });
+    var lt = perfLongTasks.slice(-6);
+    var r = perfRenders.slice(-6);
+    // COUNTS THAT SHOULD NOT GROW.
+    //
+    // The interesting question on a tab that has been open for hours is not
+    // "how slow is one frame" but "what is there more of than there was".
+    // Live animations and DOM nodes both have a correct steady-state value
+    // here; a number that climbs all afternoon is the bug.
+    var anims = document.getAnimations ? document.getAnimations().length : -1;
+    var heap = (window.performance && performance.memory)
+      ? Math.round(performance.memory.usedJSHeapSize / 1048576) + " MB" : "n/a";
+    var mins = Math.round((Date.now() - perfStart) / 60000);
+    $("perfHud").textContent =
+      "open for    " + mins + " min\n" +
+      "render ms   " + (r.length ? r.join(" ") : "-") + "\n" +
+      "frame gaps  worst " + worstGap + "ms" + "\n" +
+      "            >50ms " + janky.length + " of " + recent.length + "\n" +
+      "            " + (janky.length ? janky.slice(-8).join(" ") : "none") + "\n" +
+      "long tasks  " + (lt.length ? lt.join(" ") + " ms" : "none") + "\n" +
+      "animations  " + anims + "   sparks " + $("fx").childNodes.length + "\n" +
+      "dom nodes   " + document.querySelectorAll("*").length + "\n" +
+      "js heap     " + heap + "\n" +
+      "fetch fails " + perfFetchFails;
+  }, 1000);
+}
+
+var failures = 0;
+var pollTimer = null;
+var pollEvery = 2000;
+
+function poll() {
+  fetch("status", { cache: "no-store" })
+    .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(function (d) {
+      failures = 0;
+      setClass($("connDot"), "dot connected");
+      if (perfOn) {
+        var t0 = performance.now();
+        render(d);
+        perfRenders.push(+(performance.now() - t0).toFixed(1));
+        if (perfRenders.length > 20) perfRenders.shift();
+      } else {
+        render(d);
+      }
+      // The server owns the cadence, so changing pollSeconds in config.json
+      // takes effect on the next tick without touching this file.
+      var want = Math.max(500, (d.pollSeconds || 2) * 1000);
+      if (want !== pollEvery) {
+        pollEvery = want;
+        clearInterval(pollTimer);
+        pollTimer = setInterval(poll, pollEvery);
+      }
+    })
+    .catch(function () {
+      // One miss is a hiccup. Say so only when it persists, and leave the last
+      // good numbers on screen either way -- a dashboard that blanks itself is
+      // less useful than one that goes visibly stale.
+      failures++;
+      perfFetchFails++;
+      if (failures > 1) setClass($("connDot"), "dot disconnected");
+    });
+}
+
+// ---- controls --------------------------------------------------------------
+var MOTION_KEY = "switchyard.motion";
+var motionMode = "auto";
+
+function applyMotion(mode) {
+  motionMode = mode;
+  if (mode === "auto") document.documentElement.removeAttribute("data-motion");
+  else document.documentElement.setAttribute("data-motion", mode);
+  var b = $("motionBtn");
+  // "auto" alone tells you the policy but not the outcome, and the outcome is
+  // the thing being asked about -- especially since auto resolves to OFF on
+  // any machine with reduced-motion enabled, which is far more common than
+  // people expect. Show what auto currently means.
+  b.textContent = "motion: " + mode
+    + (mode === "auto" ? " (" + (motionOn() ? "on" : "off") + ")" : "");
+  b.className = motionOn() ? "armed" : "";
+  try { localStorage.setItem(MOTION_KEY, mode); } catch (e) { /* private browsing */ }
+  if (latest && built) drawLinks(latest, {}, true);
+}
+
+(function initMotion() {
+  // Defaults to ON rather than to auto. Auto is still offered, but it
+  // resolves to off on any machine with reduced motion enabled -- which is
+  // common enough that the default was routinely "no animations at all" for
+  // people who had never asked for that and could not tell why.
+  var mode = "on";
+  try { mode = localStorage.getItem(MOTION_KEY) || "on"; } catch (e) { /* private browsing */ }
+  if (mode !== "auto" && mode !== "on" && mode !== "off") mode = "auto";
+  applyMotion(mode);
+  $("motionBtn").addEventListener("click", function () {
+    var order = ["auto", "on", "off"];
+    applyMotion(order[(order.indexOf(motionMode) + 1) % order.length]);
+  });
+})();
+
+$("resetBtn").addEventListener("click", function () {
+  var b = $("resetBtn");
+  b.disabled = true;
+  fetch("reset", { method: "POST" })
+    .then(function () {
+      // Reset the client's baseline too, or the first poll after the server
+      // zeroes its counters looks like every pool simultaneously arriving.
+      lastBinding = {};
+      lastRotations = -1;
+      poll();
+    })
+    .catch(function () {})
+    .then(function () { b.disabled = false; });
+});
+
+function selectAddr(node) {
+  var r = document.createRange();
+  r.selectNodeContents(node.querySelector(".a") || node);
+  var sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(r);
+}
+
+// Click to copy. The Clipboard API needs a secure context, which localhost is
+// but a plain LAN IP is not -- and this page is routinely opened at
+// http://<host>:7160 from another machine. So the fallback is not decoration:
+// on that path clipboard.writeText simply rejects, and selecting the address
+// alone (never the currency mark) leaves the reader one keystroke from it.
+// ---- modals -----------------------------------------------------------------
+function openModal(id) { $(id).classList.add("show"); }
+function closeModal(id) { $(id).classList.remove("show"); }
+document.addEventListener("keydown", function (ev) {
+  if (ev.key !== "Escape") return;
+  // Escape closes the topmost modal. Deliberately does NOT save anything --
+  // an accidental Escape mid-edit should cost the edit, never apply it.
+  var open = document.querySelectorAll(".modal.show");
+  if (open.length) open[open.length - 1].classList.remove("show");
+});
+// Reopening a folded section gives it geometry for the first time, so the
+// connectors have to be measured again. Cheap, and only on a real toggle.
+document.querySelectorAll("details.sec").forEach(function (dt) {
+  dt.addEventListener("toggle", function () {
+    if (dt.open && latest) drawLinks(latest, {}, true);
+    hideHelp();
+  });
+});
+
+// Click-off dismissal is fine for a confirmation, which holds nothing, and
+// wrong for the editor, which holds unsaved work. A stray click on the
+// backdrop should not silently discard a form somebody has been filling in.
+document.querySelectorAll(".modal[data-dismiss='backdrop']").forEach(function (m) {
+  m.addEventListener("mousedown", function (ev) { if (ev.target === m) m.classList.remove("show"); });
+});
+
+// ---- rotate, behind a confirmation ----------------------------------------
+// A manual rotation is a deliberate act: it overrides the dwell floor, costs
+// every rig a reconnect, and lands in the same statistics the fairness band is
+// computed from.
+$("rotateBtn").addEventListener("click", function () { openModal("rotateModal"); });
+$("rotateCancelBtn").addEventListener("click", function () { closeModal("rotateModal"); });
+$("rotateConfirmBtn").addEventListener("click", async function () {
+  closeModal("rotateModal");
+  var b = $("rotateBtn");
+  b.disabled = true;
+  var was = b.textContent;
+  try {
+    var res = await fetch("/rotate", { method: "POST" }).then(function (r) { return r.json(); });
+    b.textContent = res.ok ? "rotating…" : "nothing to rotate";
+  } catch (e) {
+    b.textContent = "failed";
+  }
+  // The next poll paints the new placement and fires the same animations a
+  // block-driven rotation would; this is only the button settling down.
+  setTimeout(function () { b.textContent = was; b.disabled = false; }, 1600);
+});
+
+// ---- reset, behind a confirmation -------------------------------------------
+$("resetBtn").addEventListener("click", function () { openModal("resetModal"); });
+$("resetCancelBtn").addEventListener("click", function () { closeModal("resetModal"); });
+$("resetConfirmBtn").addEventListener("click", async function () {
+  closeModal("resetModal");
+  await fetch("/reset", { method: "POST" });
+  // Reload rather than patching a dozen pieces of in-memory state: the page
+  // picks up the now-empty numbers the ordinary way, through a poll.
+  location.reload();
+});
+
+// ---- config editor ----------------------------------------------------------
+//
+// One form for both jobs. First-run setup is this editor with a different
+// title and an empty pool and rig already seeded -- not a separate wizard,
+// because two forms writing the same file is exactly the kind of divergence
+// this whole feature was designed to avoid.
+//
+// The editor holds a WORKING COPY. Nothing touches the running system until
+// Save, which writes the file and asks the process to rebuild from it.
+var draft = null;
+var draftPath = "config.json";
+
+function field(label, value, opts) {
+  opts = opts || {};
+  var wrap = el("div", "f" + (opts.wide ? " wide" : ""));
+  var lab = el("label", null, label);
+  if (opts.help) lab.appendChild(helpMarker(opts.help));
+  wrap.appendChild(lab);
+  var input = el("input");
+  input.type = opts.type || "text";
+  if (opts.min !== undefined) input.min = String(opts.min);
+  if (opts.narrow) input.classList.add("narrow");
+  input.value = value === undefined || value === null ? "" : String(value);
+  if (opts.placeholder) input.placeholder = opts.placeholder;
+  if (opts.mono) input.style.fontVariantNumeric = "tabular-nums";
+  if (opts.readOnly) {
+    input.readOnly = true;
+    input.classList.add("ro");
+  }
+  // The one number an operator has to carry away from this form and type into
+  // a miner. Sized to be found at a glance rather than read off a row of
+  // identical small fields.
+  if (opts.big) input.classList.add("bigval");
+  if (opts.onInput) {
+    input.addEventListener("input", function () { opts.onInput(input.value, input, hint); });
+  }
+  var hint = el("div", "hintline", opts.hint || "");
+  // An inlineHint sits BESIDE a narrow input instead of under it. A five-digit
+  // field with a four-line caption stacked below wastes most of a card on
+  // whitespace for no gain in legibility.
+  if (opts.inlineHint) {
+    var row = el("div", "inline");
+    row.appendChild(input);
+    var side = el("div", "sidehint", opts.inlineHint);
+    row.appendChild(side);
+    wrap.appendChild(row);
+    wrap.appendChild(hint);
+    return wrap;
+  }
+  wrap.appendChild(input);
+  wrap.appendChild(hint);
+  return wrap;
+}
+
+function helpMarker(key) {
+  var b = el("button", "help", "?");
+  b.type = "button";
+  b.dataset.help = key;
+  b.setAttribute("aria-label", "What is this?");
+  return b;
+}
+
+function cardHead(title, onRemove) {
+  var head = el("div", "chead");
+  head.appendChild(el("span", "idx", title));
+  head.appendChild(el("span", "spacer"));
+  if (onRemove) {
+    var rm = el("button", "btn tiny bad", "Remove");
+    rm.type = "button";
+    rm.addEventListener("click", onRemove);
+    head.appendChild(rm);
+  }
+  return head;
+}
+
+// A listen address is stored in full but shown as a PORT, because a port is
+// what the operator is actually choosing. The wildcard host is noise on every
+// ordinary setup.
+//
+// The exception is deliberate: a config that binds a SPECIFIC interface --
+// 127.0.0.1 to keep a rig local, or one address on a multi-homed box -- is
+// making a real choice, and hiding it behind a port field would silently
+// widen the bind the next time somebody pressed save.
+function isWildcard(listen) {
+  return /^(0\.0\.0\.0:|:)?\d+$/.test(String(listen || "").trim());
+}
+function portOf(listen) {
+  var m = /(\d+)\s*$/.exec(String(listen || ""));
+  return m ? m[1] : "";
+}
+function listenDisplay(listen) {
+  return isWildcard(listen) ? portOf(listen) : String(listen || "");
+}
+
+function renderConfigForm() {
+  var body = $("configBody");
+  body.textContent = "";
+
+  // ---- timing, first ----
+  // These are one-off decisions that apply to the whole install, and they have
+  // sensible defaults already filled in. Putting them at the top means the
+  // first thing a new operator sees is a section they can read and leave
+  // alone, rather than an empty form demanding input.
+  var timing = el("div", "group");
+  timing.appendChild(el("h3", null, "Timing"));
+  timing.appendChild(el("p", "note",
+    "Rotations normally fire on a new network block. These bound how long a "
+    + "placement may last when blocks come unusually fast or unusually slow. "
+    + "The defaults are reasonable — you can leave this section alone."));
+  var tg = el("div", "fgrid");
+  var floorHint, ceilHint;
+  var floorField = field("Dwell floor (seconds)", draft.minDwellSeconds, {
+    type: "number", help: "cfgFloor", min: 0,
+    hint: "Blocks arriving sooner than this do not rotate.",
+    onInput: function (v, input, hint) {
+      draft.minDwellSeconds = v === "" ? "" : Number(v);
+      floorHint = hint; checkDwell();
+    }
+  });
+  tg.appendChild(floorField);
+  tg.appendChild(field("Dwell ceiling (seconds)", draft.maxDwellSeconds, {
+    type: "number", help: "cfgCeiling", min: 0,
+    hint: "A rotation is forced after this much quiet.",
+    onInput: function (v, input, hint) {
+      draft.maxDwellSeconds = v === "" ? "" : Number(v);
+      ceilHint = hint; checkDwell();
+    }
+  }));
+  tg.appendChild(field("Dashboard refresh (seconds)", draft.pollSeconds, {
+    type: "number", help: "cfgPoll", min: 0,
+    hint: "How often this page refetches. Floor 0.5.",
+    onInput: function (v) { draft.pollSeconds = v === "" ? "" : Number(v); }
+  }));
+  tg.appendChild(field("Gateway check (seconds)", draft.gatewayPollSeconds, {
+    type: "number", help: "cfgGatewayPoll", min: 5,
+    hint: "How often each gateway's status page is read.",
+    onInput: function (v) { draft.gatewayPollSeconds = v === "" ? "" : Number(v); }
+  }));
+  tg.appendChild(field(
+    isWildcard(draft.statusListen) ? "Dashboard port" : "Dashboard address",
+    listenDisplay(draft.statusListen), {
+      help: "cfgStatusListen", mono: true,
+      hint: "Changing this moves the page you are on.",
+      onInput: function (v) { draft.statusListen = v.trim(); }
+    }));
+  timing.appendChild(tg);
+  body.appendChild(timing);
+
+  // ---- rigs, before pools ----
+  // Mentally the miner comes first: it is the thing you own, plugged in and
+  // humming, and it is what you are trying to point somewhere. Asking about
+  // pools first inverts the order the operator is already thinking in.
+  var rigs = el("div", "group");
+  rigs.appendChild(el("h3", null, "Rigs"));
+  rigs.appendChild(el("p", "note",
+    "One entry per miner. Switchyard assigns each a free port; point that "
+    + "miner at it and leave it alone. Worker name and password come from the "
+    + "miner itself."));
+  if (!draft.rigs.length) {
+    rigs.appendChild(el("div", "empty", "No rigs yet. Add the first one below."));
+  }
+  var rigWrap = el("div", "rigwrap");
+  rigs.appendChild(rigWrap);
+  draft.rigs.forEach(function (rig, i) {
+    var card = el("div", "card");
+    // Labelled by port, not by name. There is no name here to label it with:
+    // a rig is a port, and its identity arrives from the hardware.
+    card.appendChild(cardHead("Rig " + (i + 1), function () {
+      draft.rigs.splice(i, 1);
+      renderConfigForm();
+    }));
+    var grid = el("div", "fgrid");
+    // The port is HANDED OUT, not requested.
+    //
+    // Switchyard is the only party that knows which ports are free on this
+    // machine, so asking the operator to supply one is asking them to guess at
+    // something the software can simply check. It scans, it picks, it tells
+    // you -- read-only for the same reason the pool name is: there is one
+    // correct answer and it is not a matter of preference.
+    //
+    // A hand-written config.json can still say whatever it likes; the file
+    // stays the source of truth, and whatever it says is what appears here.
+    grid.appendChild(field("Port", listenDisplay(rig.listen), {
+      wide: true, help: "cfgRigListen", mono: true, readOnly: true,
+      big: true, placeholder: "assigned on save"
+    }));
+
+    card.appendChild(grid);
+    rigWrap.appendChild(card);
+  });
+  var addRig = el("button", "btn tiny add", "Add rig");
+  addRig.type = "button";
+  addRig.addEventListener("click", async function () {
+    draft.rigs.push({ listen: await suggestPort() });
+    renderConfigForm();
+  });
+  var addRow = el("div", "addrow");
+  addRow.appendChild(addRig);
+  addRow.appendChild(el("span", "addnote",
+    "Assigns the next free port from 23401."));
+  addRow.appendChild(helpMarker("cfgPortSuggest"));
+  rigs.appendChild(addRow);
+  body.appendChild(rigs);
+
+  // ---- pools ----
+  var pools = el("div", "group");
+  pools.appendChild(el("h3", null, "Pools"));
+  pools.appendChild(el("p", "note",
+    "One entry per DATUM gateway \u2014 its ports on your own machine, not the "
+    + "pool's. The gateway names its own pool once it answers."));
+  if (!draft.pools.length) {
+    pools.appendChild(el("div", "empty", "No pools yet. Add the first one below."));
+  }
+  draft.pools.forEach(function (pool, i) {
+    var card = el("div", "card");
+    card.appendChild(cardHead("Pool " + (i + 1), function () {
+      draft.pools.splice(i, 1);
+      renderConfigForm();
+    }));
+    var grid = el("div", "fgrid");
+
+    var nameField, nameInput, statusHint, stratumHint;
+
+    // The pool's name is FETCHED, never typed.
+    //
+    // It is the tag the gateway puts in the coinbase, which is what the pool
+    // calls itself where it counts. Letting it be edited would mean the
+    // dashboard could disagree with the block, and the disagreement would be
+    // invisible -- so the field is a readout. Rename the container or the
+    // config file all you like; this stays whatever the pool says it is.
+    async function fetchTag(silent) {
+      // No early return on a missing status port. Either port on its own is
+      // worth checking, and bailing here was the other half of the asymmetry:
+      // a correct stratum port went unverified until the status port was
+      // filled in too.
+      if (!pool.statusPort && !pool.port) return;
+      if (!silent) {
+        statusHint.className = "vline";
+        statusHint.textContent = "Checking…";
+        stratumHint.className = "vline";
+        stratumHint.textContent = "";
+      }
+      try {
+        var res = await fetch("/gateway/inspect", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            host: pool.host || "127.0.0.1",
+            statusPort: pool.statusPort,
+            port: pool.port
+          })
+        }).then(function (r) { return r.json(); });
+
+        // A VERDICT ON EACH HALF, EVERY TIME.
+        //
+        // Two ports, two services, two independent ways to be wrong. Reporting
+        // only the failure meant a correct stratum port went unmentioned
+        // whenever the status port was wrong, so an operator who was halfway
+        // there saw the same thing as one who had it all wrong.
+        if (res.statusOK) {
+          pool.name = res.info.tag || res.info.poolHost || "";
+          nameInput.value = pool.name;
+          verdict(statusHint, "Status page", true,
+            "reached the DATUM gateway for " + res.info.poolHost);
+        } else {
+          nameInput.value = pool.name = "";
+          verdict(statusHint, "Status page", false, res.statusError);
+        }
+        verdict(stratumHint, "Stratum port", res.stratumOK,
+          res.stratumOK ? "answered a subscribe on " + pool.port : res.stratumError);
+      } catch (e) {
+        verdict(statusHint, "Status page", false, String(e));
+        verdict(stratumHint, "Stratum port", false, "not checked");
+      }
+    }
+
+    // One shape for every result line: what was checked, then how it went.
+    // Leading with the subject means the two lines stay scannable as a pair
+    // even when one of them wraps onto a second row.
+    function verdict(line, label, ok, detail) {
+      line.className = "vline " + (ok ? "ok" : "err");
+      line.textContent = "";
+      line.appendChild(el("b", null, label));
+      line.appendChild(document.createTextNode(" \u00b7 " + detail));
+    }
+
+    grid.appendChild(field("Gateway host", pool.host, {
+      wide: true, placeholder: "127.0.0.1", help: "cfgPoolHost", mono: true,
+      onInput: function (v) { pool.host = v.trim(); scheduleTag(); }
+    }));
+
+    // Three short fields on one line beneath the host. They belong together --
+    // two ports on that host and the name it reports back -- and stacking them
+    // spread four lines of a card over a screen's worth of nothing. The help
+    // markers carry what the captions used to say.
+    var trio = el("div", "trio");
+
+    var portField = field("Stratum port", pool.port, {
+      type: "number", placeholder: "23334", help: "cfgPoolPort", mono: true, narrow: true,
+      onInput: function (v) { pool.port = parseInt(v, 10) || 0; scheduleTag(); }
+    });
+    trio.appendChild(portField);
+
+    var statusField = field("Status port", pool.statusPort, {
+      type: "number", placeholder: "7152", help: "cfgPoolStatusPort", mono: true, narrow: true,
+      onInput: function (v) { pool.statusPort = parseInt(v, 10) || 0; scheduleTag(); }
+    });
+    trio.appendChild(statusField);
+
+    nameField = field("Pool name", pool.name, {
+      readOnly: true, help: "cfgPoolName", placeholder: "fetched from the gateway"
+    });
+    nameInput = nameField.querySelector("input");
+    trio.appendChild(nameField);
+
+    // The results sit in their own full-width block BELOW the row rather than
+    // under the field each belongs to. Attached to a field they were either in
+    // flow -- where a long message stretched that field wide enough to wrap the
+    // whole row -- or absolutely positioned, where they could not wrap at all
+    // and pushed a horizontal scrollbar onto the modal. Here they are ordinary
+    // block text: they wrap, and the card grows to hold them.
+    var results = el("div", "results");
+    statusHint = el("div", "vline");
+    stratumHint = el("div", "vline");
+    results.appendChild(statusHint);
+    results.appendChild(stratumHint);
+
+    var w = el("div", "f wide");
+    w.appendChild(trio);
+    w.appendChild(results);
+    grid.appendChild(w);
+
+    // Debounced rather than a button. Typing a port and then hunting for
+    // something to press is a step that exists only because the software did
+    // not notice you had finished.
+    var tagTimer = null;
+    function scheduleTag() {
+      clearTimeout(tagTimer);
+      tagTimer = setTimeout(function () { fetchTag(false); }, 1000);
+    }
+
+    card.appendChild(grid);
+    pools.appendChild(card);
+
+    // Always refresh on open, not just when the name is blank.
+    //
+    // The tag is authoritative and the dashboard already shows it, so a form
+    // still displaying a stale config label would disagree with the page
+    // behind it -- and a save would then write that stale label back to disk.
+    if (pool.statusPort) fetchTag(true);
+  });
+  var addPool = el("button", "btn tiny add", "Add pool");
+  addPool.type = "button";
+  addPool.addEventListener("click", function () {
+    draft.pools.push({ host: "127.0.0.1" });
+    renderConfigForm();
+  });
+  pools.appendChild(addPool);
+  body.appendChild(pools);
+
+  wireAllHelp();
+  checkDwell();
+}
+
+// checkDwell enforces the one relationship between two fields that neither can
+// check alone: the ceiling has to be STRICTLY above the floor. Equal is the
+// same failure as inverted -- the instant a placement satisfies the floor it
+// has also reached the ceiling, and every rotation immediately qualifies for
+// another one.
+function checkDwell() {
+  var lo = Number(draft.minDwellSeconds), hi = Number(draft.maxDwellSeconds);
+  var inputs = document.querySelectorAll("#configBody .group:first-of-type input");
+  var loIn = inputs[0], hiIn = inputs[1];
+  if (!loIn || !hiIn) return;
+  var loHint = loIn.parentElement.querySelector(".hintline");
+  var hiHint = hiIn.parentElement.querySelector(".hintline");
+  loIn.classList.remove("bad"); hiIn.classList.remove("bad");
+  loHint.className = "hintline"; hiHint.className = "hintline";
+  loHint.textContent = "Blocks arriving sooner than this do not rotate.";
+  hiHint.textContent = "A rotation is forced after this much quiet.";
+
+  if (lo < 0) {
+    loIn.classList.add("bad");
+    loHint.className = "hintline err";
+    loHint.textContent = "Cannot be negative.";
+  }
+  if (hi < 0) {
+    hiIn.classList.add("bad");
+    hiHint.className = "hintline err";
+    hiHint.textContent = "Cannot be negative.";
+  }
+  if (lo >= 0 && hi >= 0 && hi <= lo) {
+    hiIn.classList.add("bad");
+    hiHint.className = "hintline err";
+    hiHint.textContent = hi === lo
+      ? "Must be greater than the floor, not equal to it."
+      : "Must be greater than the floor (" + lo + "s).";
+  }
+}
+
+// suggestPort asks the server for a port nothing is using, excluding any this
+// form has already pencilled in. Returns "" if nothing is free, which still
+// leaves a usable (blank) field.
+async function suggestPort() {
+  var taken = draft.rigs.map(function (r) { return portOf(r.listen); }).filter(Boolean);
+  try {
+    var res = await fetch("/ports/suggest?taken=" + encodeURIComponent(taken.join(",")))
+      .then(function (r) { return r.json(); });
+    if (res.ok) return String(res.port);
+  } catch (e) { /* a suggestion is a convenience, not a requirement */ }
+  return "";
+}
+
+// checkPort asks the server whether an address can actually be bound.
+// Debounced, because it opens a real socket on each call.
+var portTimer = null;
+function checkPort(value, input, hint) {
+  clearTimeout(portTimer);
+  hint.className = "hintline";
+  hint.textContent = "Port this miner connects to.";
+  input.classList.remove("bad");
+  if (!value.trim()) return;
+  portTimer = setTimeout(async function () {
+    try {
+      var res = await fetch("/ports/probe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ listen: value })
+      }).then(function (r) { return r.json(); });
+      if (res.ok) {
+        hint.className = "hintline ok";
+        hint.textContent = res.mine ? "In use by this rig already — fine." : "Available.";
+        input.classList.remove("bad");
+      } else {
+        hint.className = "hintline err";
+        hint.textContent = "Cannot listen here: " + res.error;
+        input.classList.add("bad");
+      }
+    } catch (e) { /* leave the neutral hint in place */ }
+  }, 350);
+}
+
+async function openConfig(firstRun) {
+  var msg = $("configMsg");
+  msg.className = "msg";
+  msg.textContent = "";
+  $("configTitle").textContent = firstRun ? "Set up switchyard" : "Configuration";
+  // The path has to be fetched BEFORE the lede is written, or the sentence
+  // names a file that is not the one about to be rewritten -- which is
+  // precisely the fact this line exists to convey.
+  try {
+    var res = await fetch("/config").then(function (r) { return r.json(); });
+    draft = res.config || {};
+    draftPath = res.path || draftPath;
+  } catch (e) {
+    msg.className = "msg err";
+    msg.textContent = "Could not read the current config: " + e;
+    return;
+  }
+  // Deliberately NOT the resolved path. Switchyard reports the path it was
+  // given, which inside a container is a path that exists only in the
+  // container -- telling somebody their config is at /config/config.json when
+  // the file they edit is somewhere else entirely is worse than saying nothing.
+  // The operator started this process; they know where the file is.
+  // The modal is an EDITOR, not a view of the running system, and the gap
+  // between the two is where somebody points a miner at a port that is not
+  // listening yet and concludes the software is broken. Say so once, at the
+  // top, rather than hoping it is inferred.
+  $("configPending").textContent = firstRun
+    ? "Nothing here takes effect until you press Save and apply."
+    : "Editing a copy. No change here \u2014 ports, pools or timing \u2014 is "
+      + "live until you press Save and apply.";
+  $("configLede").textContent = firstRun
+    ? "Add the miners you own and the pools you mine. Everything here is written to "
+      + "config.json; nothing is applied until you save."
+    : "Saved to config.json, then rebuilt from that file — the same path a cold "
+      + "start takes. Saving drops rig sessions briefly and resets every statistic.";
+  draft.pools = draft.pools || [];
+  draft.rigs = draft.rigs || [];
+  if (firstRun) {
+    if (!draft.pools.length) draft.pools.push({ name: "", addr: "" });
+    if (!draft.rigs.length) {
+      var listen = "";
+      try {
+        var sug = await fetch("/ports/suggest").then(function (r) { return r.json(); });
+        if (sug.ok) listen = sug.listen;
+      } catch (e) { /* blank is still usable */ }
+      draft.rigs.push({ name: "", listen: listen, user: "", pass: "x" });
+    }
+  }
+  renderConfigForm();
+  openModal("configModal");
+}
+
+$("configBtn").addEventListener("click", function () { openConfig(false); });
+$("setupStartBtn").addEventListener("click", function () { openConfig(true); });
+// Name the real file on the setup screen as well, so "edit it by hand" is
+// actionable rather than a gesture at a filename that may not be the one.
+
+$("configCancelBtn").addEventListener("click", function () { closeModal("configModal"); });
+$("configCloseBtn").addEventListener("click", function () { closeModal("configModal"); });
+
+$("configSaveBtn").addEventListener("click", async function () {
+  var msg = $("configMsg"), btn = $("configSaveBtn");
+  msg.className = "msg";
+  msg.textContent = "Saving…";
+  btn.disabled = true;
+  try {
+    var res = await fetch("/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(draft)
+    });
+    var out = await res.json();
+    if (!res.ok) {
+      msg.className = "msg err";
+      msg.textContent = out.error || "Rejected.";
+      btn.disabled = false;
+      return;
+    }
+    msg.className = "msg ok";
+    msg.textContent = "Saved. Rebuilding…";
+    // The rebuild tears down listeners and may move this very server, so the
+    // page waits for it to come back rather than assuming. It also has to
+    // reload: the flow diagram's nodes are built once, and the whole topology
+    // has just changed underneath them.
+    setTimeout(function () { location.reload(); }, 1200);
+  } catch (e) {
+    msg.className = "msg err";
+    msg.textContent = "Could not save: " + e;
+    btn.disabled = false;
+  }
+});
+
+// ---- Help popovers ------------------------------------------------------
+// Same mechanism as blockwatch, and deliberately so: one shared element rather
+// than a hidden node per marker, hover for mouse, click for touch, a grace
+// period so the pointer can travel into the popover without dismissing it.
+//
+// Column headers in the two tables keep the NATIVE title tooltip. Those are
+// one line each, the browser's own delay is what stops them firing while you
+// scan a row, and a dozen "?" bubbles in a header row would be noise. The rule
+// is length: anything that needs a paragraph gets a real popover, because
+// title text cannot be styled, cannot be read at leisure, and is silently
+// truncated by some browsers.
+var HELP_TEXT = {
+  motion:
+    "<p>Rotation animations: the new link goes solid, a spark runs along it, "
+    + "the arriving gateway flashes.</p>"
+    + "<p><b>auto</b> follows your system's <i>reduce motion</i> setting, which "
+    + "is on more often than people expect \u2014 so the button shows what auto "
+    + "currently resolves to. Click to force on or off.</p>",
+
+  reset:
+    "<p>Zero every statistic and restart the averaging clock.</p>"
+    + "<p>Nothing disconnects. Use it after moving hardware, so old averages "
+    + "stop dragging on the new arrangement.</p>",
+
+  rotate:
+    "<p>Move every rig to its next pool now, without waiting for a block or "
+    + "the dwell floor.</p>"
+    + "<p>Each rig reconnects, which takes a fraction of a second — the "
+    + "gateway sessions stay open throughout. Frequent manual rotations skew "
+    + "the share-of-work figures.</p>",
+
+  configure:
+    "<p>Edit the rigs, pools and timing.</p>"
+    + "<p>Saving writes <span class=\"k\">config.json</span> and rebuilds from "
+    + "that file \u2014 the same path a cold start takes. Editing the file by "
+    + "hand and restarting reaches the same place.</p>"
+    + "<p><b>Saving interrupts mining briefly</b> and resets every statistic.</p>",
+
+  statHashrate:
+    "<p>Combined hashrate across every rig right now, from accepted-share "
+    + "difficulty over the last few minutes.</p>"
+    + "<p>The average beneath it is the steadier number; short windows are "
+    + "mostly noise.</p>",
+
+  statCost:
+    "<p>What rotating has actually cost, measured rather than estimated.</p>"
+    + "<p>A rotation ends a rig’s session, and the miner is not hashing "
+    + "from the moment its socket closes until its own firmware has "
+    + "reconnected and taken a job. That gap is pure loss and switchyard "
+    + "cannot hurry it.</p>"
+    + "<p>The percentage is the share of all available rig-time lost this way, "
+    + "so it is directly comparable to hashrate: 1% here means 1% less work "
+    + "reached your pools than your hardware produced.</p>"
+    + "<p>Only gaps switchyard itself caused are counted. A miner that goes "
+    + "away for its own reasons is excluded, as is any gap over a minute.</p>",
+
+  statRotations:
+    "<p>How many times the rigs have moved since this process started.</p>"
+    + "<p>Also the sample size behind the fairness band \u2014 the band narrows "
+    + "as this climbs.</p>",
+
+  statOnPool:
+    "<p>Time since the last rotation.</p>"
+    + "<p>Rotations fire on new blocks, and block intervals are exponential: "
+    + "ten seconds and twenty minutes are both ordinary.</p>",
+
+  statDwell:
+    "<p>The limits on how long one placement may last.</p>"
+    + "<p><b>Floor:</b> a block arriving sooner does not trigger a rotation. "
+    + "<b>Ceiling:</b> a rotation is forced once the chain has been quiet this "
+    + "long.</p>",
+
+  statTip:
+    "<p>The hash of the block your gateways are building on top of — the "
+    + "<b>prevhash</b> field of the jobs they push, which is the chain’s "
+    + "own statement of where the tip is.</p>"
+    + "<p>It is here because <b>this is the rotation clock</b>. Switchyard "
+    + "rotates when this value changes, so a tip that moves is the block "
+    + "signal working — and a tip that has sat still for far longer than "
+    + "a block interval is the one thing that would stop rotation entirely.</p>"
+    + "<p>Shown tail first: every block hash begins with the same run of "
+    + "zeros, so the end is the part that identifies it. Compare it against a "
+    + "block explorer to confirm your node is on the main chain.</p>",
+
+  statUptime:
+    "<p>How long this process has been running. Every figure on this page is "
+    + "measured from that instant.</p>",
+
+  flow:
+    "<p>Every rig holds an open session to <b>every</b> gateway. Only the "
+    + "binding moves, so a rotation costs one reconnect and never a fresh "
+    + "handshake with the pool.</p>"
+    + "<p><b>Solid</b> lines carry work; <b>dashed</b> ones are idle. The "
+    + "centre column lists the ports to point miners at.</p>"
+    + "<p>A <b>blue-grey</b> rig is one whose miner has not arrived yet. After "
+    + "a restart or a config change they reconnect on their own firmware's "
+    + "schedule, which takes tens of seconds and is not something switchyard "
+    + "can hurry. Red means it has been long enough to be worth checking.</p>"
+    + "<p>A <b>rotation</b> does not cause this. The rig is dropped and "
+    + "reconnects to a listener that is still there, so the gap is too short "
+    + "to see.</p>",
+
+  share:
+    "<p>Every pool should end up with an equal share of the work. This chart "
+    + "shows how close each one currently is.</p>"
+    + "<p>The band is one standard deviation either side of an even split, and "
+    + "its width comes from the number of <b>rotations</b>, not shares: a "
+    + "rig\u2019s whole output for one dwell lands on one pool, so a dwell is one "
+    + "draw.</p>"
+    + "<p>It errs wide. Falling outside it is real evidence of a problem; "
+    + "sitting inside it is weaker evidence of fairness.</p>",
+
+  sessions:
+    "<p>One row per rig per gateway, including idle sessions.</p>"
+    + "<p>A stale last-share only means <i>this</i> rig has not been on "
+    + "<i>that</i> gateway lately, which is the normal state of most rows.</p>",
+
+  poolsTable:
+    "<p>The same data by pool. Last share here is from <b>any</b> rig \u2014 the "
+    + "number that answers whether a pool still considers you active.</p>",
+
+  outbound:
+    "<p>Every socket switchyard holds open to another machine. The list should "
+    + "be your gateways and nothing else.</p>"
+    + "<p>It is self-reported, so check it: <span class=\"k\">ss -tp</span> or "
+    + "<span class=\"k\">netstat -ano</span> should match exactly.</p>",
+
+  cfgRigListen:
+    "<p>The port to point this miner at. Switchyard assigns it from 23401 "
+    + "upwards and it does not change.</p>"
+    + "<p>Configure the miner exactly as you would to reach the pool directly; "
+    + "its worker name and password arrive on the connection and are forwarded "
+    + "unchanged.</p>",
+
+  cfgStatusListen:
+    "<p>The port this dashboard is served on. Changing it moves the page you "
+    + "are looking at.</p>"
+    + "<p>A bare port listens on every interface. For local only, put "
+    + "<span class=\"k\">127.0.0.1:7160</span> in the file.</p>"
+    + "<p>There is no authentication here, and this page can rewrite the "
+    + "config.</p>",
+
+  cfgFloor:
+    "<p>Minimum time on a pool. Blocks arriving sooner do not trigger a "
+    + "rotation.</p>"
+    + "<p>Too low and rigs spend more time reconnecting than hashing.</p>",
+
+  cfgCeiling:
+    "<p>Maximum time on a pool. A rotation is forced once the chain has been "
+    + "quiet this long.</p>"
+    + "<p>Must be larger than the floor.</p>",
+
+  cfgPoll:
+    "<p>How often this dashboard asks switchyard for new numbers. Display "
+    + "only \u2014 it does not affect mining.</p>",
+
+  cfgGatewayPoll:
+    "<p>How often switchyard reads each gateway\u2019s status page for its pool "
+    + "name and accept/reject counts.</p>"
+    + "<p>This is the only place pool-side rejects are visible, so do not set "
+    + "it far apart.</p>",
+
+  cfgPoolHost:
+    "<p>Where the DATUM gateway runs \u2014 usually "
+    + "<span class=\"k\">127.0.0.1</span>. This is your gateway, not the "
+    + "pool.</p>",
+
+  cfgPoolPort:
+    "<p>The port DATUM accepts <b>miners</b> on \u2014 where switchyard sends "
+    + "work. Usually 23334.</p>"
+    + "<p>Checked separately from the status port: reaching one says nothing "
+    + "about the other.</p>",
+
+  cfgPoolStatusPort:
+    "<p>The port DATUM serves its <b>status web page</b> on \u2014 the dashboard "
+    + "you open in a browser to see what the gateway is doing. Usually 7152.</p>"
+    + "<p>Switchyard reads that same page for the pool name and the pool-side "
+    + "accept and reject counts.</p>",
+
+  cfgPortSuggest:
+    "<p>Ports are assigned automatically, starting at 23401 and skipping "
+    + "anything already in use on this machine.</p>",
+
+  cfgPoolName:
+    "<p>Read from the gateway\u2019s coinbase tag \u2014 what this pool calls "
+    + "itself where it counts. Not editable.</p>",
+};
+
+var helpPop = document.createElement("div");
+helpPop.id = "helpPop";
+helpPop.setAttribute("role", "tooltip");
+document.body.appendChild(helpPop);
+var helpOpener = null, helpHideTimer = null;
+// A popover that vanishes the instant the pointer leaves its trigger is
+// unusable when the pointer covers the text: you can see it is there, and
+// reaching for it dismisses it. The grace period and the vertical gap below
+// fix that together.
+var HELP_HIDE_DELAY = 220;
+
+function cancelHelpHide() { clearTimeout(helpHideTimer); helpHideTimer = null; }
+function scheduleHelpHide() { cancelHelpHide(); helpHideTimer = setTimeout(hideHelp, HELP_HIDE_DELAY); }
+// clearMarkers drops the highlight from every marker.
+//
+// Clearing only the current opener is not enough, and the gap is easy to walk
+// into: moving the pointer from one marker straight to the next reassigns
+// helpOpener before the first one's hide timer fires, so the first stays lit
+// with nothing to turn it off. Sweeping all of them is a dozen attribute
+// writes on an event that happens at human speed.
+function clearMarkers() {
+  document.querySelectorAll('.help[aria-expanded="true"]').forEach(function (m) {
+    m.setAttribute("aria-expanded", "false");
+  });
+}
+
+function hideHelp() {
+  cancelHelpHide();
+  helpPop.classList.remove("show");
+  clearMarkers();
+  helpOpener = null;
+}
+helpPop.addEventListener("mouseenter", cancelHelpHide);
+helpPop.addEventListener("mouseleave", scheduleHelpHide);
+
+function showHelpHTML(anchorEl, body) {
+  if (!body) return;
+  cancelHelpHide();
+  clearMarkers();
+  helpPop.innerHTML = body;
+  helpPop.classList.add("show");
+  helpOpener = anchorEl;
+  var r = anchorEl.getBoundingClientRect();
+  var pop = helpPop.getBoundingClientRect();
+  var margin = 8, GAP = 14;
+  // Offset rather than centred: centring drops the popover under the pointer,
+  // so the cursor sits on the opening words.
+  var left = Math.max(margin, Math.min(r.left - 14, window.innerWidth - pop.width - margin));
+  var top = r.bottom + GAP;
+  if (top + pop.height > window.innerHeight - margin) top = Math.max(margin, r.top - pop.height - GAP);
+  helpPop.style.left = Math.round(left) + "px";
+  helpPop.style.top = Math.round(top) + "px";
+}
+
+// Two kinds of trigger, one popover. A "?" marker carries a key into HELP_TEXT;
+// a mark on a bar carries its own rendered HTML in data-mark, because its text
+// contains live numbers that change on every poll.
+function helpBodyFor(t) {
+  if (t.__mark) return t.__mark;
+  if (t.dataset && t.dataset.mark) return t.dataset.mark;
+  var body = HELP_TEXT[t.dataset.help];
+  // Silence here is how a whole page of markers came to highlight without
+  // opening anything: the text had been deleted and nothing said so.
+  if (!body) console.warn("switchyard: no help text for", t.dataset.help);
+  return body;
+}
+
+function wireHelp(t) {
+  if (t.dataset.helpWired) return;
+  t.dataset.helpWired = "1";
+  var isMarker = t.classList.contains("help");
+  if (isMarker) t.setAttribute("aria-expanded", "false");
+  // aria-expanded is set only if a popover ACTUALLY opened. Setting it
+  // unconditionally is what left a marker lit up yellow forever when its help
+  // text was missing: nothing ever became helpOpener, so nothing ever cleared
+  // it again. A marker that highlights without showing anything is worse than
+  // one that does nothing at all -- it looks like the page is broken, which
+  // it was.
+  t.addEventListener("mouseenter", function () {
+    cancelHelpHide();
+    showHelpHTML(t, helpBodyFor(t));
+    if (isMarker && helpOpener === t) t.setAttribute("aria-expanded", "true");
+  });
+  t.addEventListener("mouseleave", function () {
+    if (helpOpener === t) scheduleHelpHide();
+    else if (isMarker) t.setAttribute("aria-expanded", "false");
+  });
+  t.addEventListener("focus", function () { cancelHelpHide(); showHelpHTML(t, helpBodyFor(t)); });
+  t.addEventListener("blur", function () { if (helpOpener === t) scheduleHelpHide(); });
+  // Click toggles rather than merely opening, so a second tap dismisses it on
+  // touch, where there is no mouseleave to do it.
+  t.addEventListener("click", function (ev) {
+    ev.stopPropagation();
+    // Markers live inside <summary> elements now, where a click would
+    // otherwise toggle the section. Reading the help for a section is not a
+    // request to collapse it.
+    ev.preventDefault();
+    if (helpOpener === t) hideHelp(); else showHelpHTML(t, helpBodyFor(t));
+  });
+}
+
+// The bars are rebuilt on every poll, so wiring runs again after each render.
+// wireHelp is idempotent, which keeps that free.
+function wireAllHelp() {
+  document.querySelectorAll(".help, [data-mark]").forEach(wireHelp);
+}
+wireAllHelp();
+document.addEventListener("click", function () { if (helpOpener) hideHelp(); });
+document.addEventListener("keydown", function (ev) { if (ev.key === "Escape") hideHelp(); });
+window.addEventListener("resize", hideHelp);
+
+document.querySelectorAll(".tip[data-addr]").forEach(function (t) {
+  t.addEventListener("click", function () {
+    var addr = t.getAttribute("data-addr");
+    var done = function () {
+      t.classList.add("copied");
+      setTimeout(function () { t.classList.remove("copied"); }, 1400);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(addr).then(done, function () { selectAddr(t); });
+    } else {
+      selectAddr(t);
+    }
+  });
+});
+
+// Links are measured from live geometry, so they must be redrawn whenever that
+// geometry can change -- not only when the data does.
+var rt;
+window.addEventListener("resize", function () {
+  clearTimeout(rt);
+  rt = setTimeout(function () { if (latest && built) drawLinks(latest, {}, true); }, 120);
+});
+
+poll();
+pollTimer = setInterval(poll, pollEvery);
+</script>
+</body>
+</html>

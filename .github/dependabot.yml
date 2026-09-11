@@ -1,0 +1,12 @@
+# Switchyard has no third-party Go dependencies -- there is no go.sum to track.
+# What does drift is the pinned action versions in the workflows, and a stale
+# action is the one supply-chain surface this repo actually has: those run with
+# a token that can write releases and push container images.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci

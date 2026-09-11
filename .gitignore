@@ -1,0 +1,18 @@
+.idea/
+.junie/
+
+*.iml
+*.exe
+switchyard
+
+config.json
+config-backup.json
+config.json.bak
+*.bak
+
+# Release artefacts from a local `just`-driven build. CI builds these into a
+# clean checkout, so a copy here is always a leftover.
+dist/
+
+# Coverage profiles.
+*.out

@@ -1,0 +1,31 @@
+.idea/
+.junie/
+.git
+
+*.iml
+*.exe
+
+.gitignore
+.dockerignore
+config.json
+config.example.json
+Dockerfile
+README.md
+
+# Docs assets are build inputs to nothing -- keep them out of the image.
+docs/
+
+# Tests are not a build input. The Dockerfile copies *.go, which would
+# otherwise sweep every _test.go file into the build layer -- `go build`
+# ignores them, so they are pure weight.
+*_test.go
+
+# Neither are the local binary or anything that exists only for humans.
+switchyard
+dist/
+.github/
+tools/
+justfile
+LICENSE
+CLAUDE.md
+SECURITY.md
