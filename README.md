@@ -5,6 +5,11 @@ own clock.
 
 Fixed tracks, rolling stock, routed between them on a schedule.
 
+> **Read this first: switchyard is not a replacement for DATUM gateway and
+> needs a DATUM gateway running per pool.** One Bitcoin node serves all of
+> them, but each pool gets its own gateway process, permanently connected
+> to it. Three pools means three gateways.
+
 ![The switchyard dashboard](docs/dashboard.png)
 
 *Two rigs, three pools, 280 rotations in. Each pool received 0.33, 0.35 and
@@ -57,11 +62,9 @@ so every pool's long-run share is equal.
 
 ## How it works
 
-**One gateway per pool, one listener per rig.** A DATUM gateway's pool identity
-is welded in at two levels: its config (`pool_host`, `pool_port`,
-`pool_pubkey`) and the live state its Prime pushes down (payout scriptsig,
-coinbase tag, prime ID, vardiff floor). Repointing one means restarting it,
-which shows the pool a real disconnect.
+**One gateway per pool, one listener per rig.** Gateways are never repointed
+— each stays welded to its pool for life (see [What you need](#what-you-need)).
+Rigs are the only thing that moves.
 
 **The schedule.** Rig `i` at step `t` is on pool `(base[i] + t) mod P`. Each
 rig keeps a fixed offset, so rigs never converge; every rig visits every pool
@@ -134,12 +137,26 @@ run switchyard.
 
 ## What you need
 
-**One DATUM gateway per pool.** This is the biggest requirement, and it is more
-infrastructure than switchyard itself.
+**One DATUM gateway per pool, all sharing one node.** This is the biggest
+requirement, and it is more infrastructure than switchyard itself.
 
-A gateway's pool identity is fixed at startup, so one gateway cannot serve
-multiple pools. You run one for each pool, permanently connected to it, and
-switchyard moves rigs between them.
+```
+                    ┌─▶ gateway A ──▶ pool A
+rigs ─▶ switchyard ─┼─▶ gateway B ──▶ pool B      every gateway reads from
+                    └─▶ gateway C ──▶ pool C      the same bitcoin node
+```
+
+A gateway's pool identity is fixed at startup — `pool_host`, `pool_port`,
+`pool_pubkey` in its config, plus the payout script and coinbase tag its
+Prime pushes down once connected. Repointing a gateway means restarting it,
+and a restart shows the pool a real disconnect. So switchyard does not repoint
+gateways. It runs one per pool, holds a session to each permanently, and moves
+rigs between them; only the rig-facing connection ever cycles. That is what
+makes a rotation invisible to the pools, and it is why the requirement to run
+a separate gateway process for each pool is non-negotiable.
+
+The gateways are ordinary, unmodified DATUM. They only differ in which pool
+they talk to. All of them use the same node.
 
 | You have        | You need                                             |
 |-----------------|------------------------------------------------------|
@@ -147,16 +164,31 @@ switchyard moves rigs between them.
 | 5 pools, 1 rig  | 5 gateways, 1 switchyard, 1 listener port            |
 | 1 pool, 1 rig   | switchyard not needed — point the rig at the gateway |
 
-Also **`pool_pass_full_users: false`** on every gateway. It is the DATUM
-default, so usually nothing to do — but the failure when it is wrong is silent
-and total. See [One requirement on your gateways](#one-requirement-on-your-gateways).
+**How hard this is depends entirely on how you run things.** Under Docker or
+compose it is a few copied lines per pool — see
+[examples/docker-compose.yml](examples/docker-compose.yml). On bare metal it is
+one config file and one process per pool — see
+[Several gateways on one machine](#several-gateways-on-one-machine). On
+StartOS or Umbrel, which are built around one instance of each app, it means
+sideloading extra gateways; it can be done, but it is outside what these docs
+cover.
+
+**One miner per rig port.** A listener port is bound to whichever miner most
+recently subscribed on it; a second miner on the same port displaces the
+first. Give every rig its own port.
+
+Also **`pool_pass_full_users: false`** on every gateway. **DATUM's default is
+`true`**, and its example config ships with `true`, so this is a change you
+have to make — and the failure when it is wrong is silent and total. See
+[One requirement on your gateways](#one-requirement-on-your-gateways).
 
 ---
 
 ## One requirement on your gateways
 
-Set **`pool_pass_full_users: false`** on every gateway. This is the DATUM
-default.
+Set **`pool_pass_full_users: false`** on every gateway. DATUM defaults this to
+`true` (`datum_conf.c`, `.default_bool = true`) and its example config ships
+with `true`, so a gateway you have not deliberately changed has it wrong.
 
 With it false, the gateway pays its own configured `pool_address` and forwards
 only the worker label — so the username switchyard passes through is just a
@@ -226,6 +258,11 @@ Two things catch people:
 Then open `http://<host>:7160/` and add pools and rigs from the setup screen.
 No config file to write by hand.
 
+**The whole stack, gateways included**, is in
+[examples/docker-compose.yml](examples/docker-compose.yml): three gateways
+against one node, plus switchyard. Each gateway is the same service block with
+a different config file. Adding a pool is copying one block and one file.
+
 ### Binary
 
 Download from [Releases](https://github.com/Insulince/switchyard/releases):
@@ -262,6 +299,32 @@ thing is easy to get wrong: the user it runs as needs **write** access to the
 config *directory*, not just the config file, because saving from the dashboard
 writes a new file and renames it over the old one.
 
+### Several gateways on one machine
+
+Without containers, the gateway-per-pool requirement means N copies of
+`datum_gateway` on one host. They all use the same node; only ports and the
+pool section differ. Start from
+[examples/datum-gateway.json](examples/datum-gateway.json) and make one file
+per pool:
+
+| Key                          | Per pool                                     |
+|------------------------------|----------------------------------------------|
+| `stratum.listen_port`        | Distinct — 23336, 23337, 23338 …             |
+| `api.listen_port`            | Distinct — 7154, 7155, 7156 … (not `0`; switchyard reads it) |
+| `datum.pool_host` / `pool_port` / `pool_pubkey` | That pool's values            |
+| `mining.pool_address`        | Your payout address for that pool            |
+| `datum.pool_pass_full_users` | `false`, every file                          |
+| `bitcoind.*`                 | Identical — one node                         |
+
+```
+datum_gateway -c pool-a.json &
+datum_gateway -c pool-b.json &
+datum_gateway -c pool-c.json &
+```
+
+Keep them running however you keep your node running. Then point switchyard
+at `127.0.0.1` with each gateway's stratum port and API port.
+
 **Working on it.** `just check` runs what CI runs — gofmt, a syntax check of
 the embedded dashboard, `go vet`, and the tests under the race detector. The
 dashboard has no build step, so editing `index.html` and rebuilding is the
@@ -293,7 +356,7 @@ typo fails loudly instead of being ignored.
 | `pools[].name` | — | A label for the dashboard. |
 | `pools[].host` | — | The gateway's address — container name, hostname or IP. |
 | `pools[].port` | — | The gateway's **stratum** port (DATUM default `23334`). |
-| `pools[].statusPort` | — | The gateway's **status page** port (DATUM default `7152`). Required — it is how switchyard shows what the pool actually accepted. |
+| `pools[].statusPort` | — | The gateway's **status page** port (`7152` in DATUM's example config; the default is `0`, disabled, so make sure it is set). Required — it is how switchyard shows what the pool actually accepted. |
 | `rigs[].listen` | — | This rig's port. Assigned from 23401 up. |
 | `minDwellSeconds` | `60` | Floor on a rotation slot, so fast blocks don't spend more time reconnecting than hashing. |
 | `maxDwellSeconds` | `900` | Ceiling, so a slow block doesn't strand a pool. |

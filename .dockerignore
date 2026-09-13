@@ -14,6 +14,7 @@ README.md
 
 # Docs assets are build inputs to nothing -- keep them out of the image.
 docs/
+examples/
 
 # Tests are not a build input. The Dockerfile copies *.go, which would
 # otherwise sweep every _test.go file into the build layer -- `go build`

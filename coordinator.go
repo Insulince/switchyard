@@ -739,21 +739,18 @@ func (co *coordinator) status() statusDoc {
 	co.mu.Unlock()
 
 	// RESOLVE DISPLAY NAMES FIRST, before anything else refers to a pool.
+	// One name per pool, computed once, used everywhere: BoundTo, Occupants
+	// and the per-gateway rows all key on it, and two sources of truth once
+	// left the dashboard unable to join a rig to the pool it was on.
 	//
-	// The tag from the gateway overrides the config label, and the previous
-	// version applied that override at the END of this function -- after
-	// BoundTo and Occupants had already been written using config names. The
-	// two then disagreed, so the dashboard could not match a rig's binding to
-	// any pool, and every port-to-gateway link silently rendered as idle: rigs
-	// visibly connected, gateways visibly carrying, and nothing joining them.
-	//
-	// One name per pool, computed once, used everywhere.
+	// The name is the operator's label and nothing else. The setup form
+	// fills it in from the gateway's pool tag, so it usually IS the tag --
+	// but a live override from the status page was tried and removed: in
+	// non-pooled mode DATUM prints the local coinbase tag in the same field,
+	// and for nine hours a pool was renamed to its operator.
 	poolName := make([]string, len(co.cfg.Pools))
 	for j, pool := range co.cfg.Pools {
 		poolName[j] = pool.displayName()
-		if h, ok := co.gw.get(pool.Name); ok && h.Tag != "" {
-			poolName[j] = h.Tag
-		}
 	}
 
 	pools := make([]poolStatus, len(co.cfg.Pools))

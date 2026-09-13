@@ -173,6 +173,57 @@ func TestGatewayHealthIgnoresSmallSamples(t *testing.T) {
 // so nothing could match a rig's binding to a pool -- rigs drew as connected,
 // gateways drew as carrying, and every link between them rendered idle. No
 // error, no log line, just a diagram missing its middle.
+// A gateway whose Prime connection has failed does not stop. DATUM falls back
+// to solo mining under the LOCAL coinbase tag and keeps accepting shares, and
+// its status page prints that local tag in the "Pool Tag" field. Seen live:
+// a Prime upgraded past the gateway's version ("Bad configuration version
+// from server"), nine hours in Non-Pooled Mode, the pool-side accepted
+// counter frozen, the card green, and the pool quietly renamed to the
+// operator. The state must be flagged, and nothing read from the page may
+// ever become the pool's name.
+func TestUnpooledGatewayIsFlaggedAndKeepsItsConfigName(t *testing.T) {
+	page := `<html><body>
+	  <tr><td>Pool Shares Accepted:</td><td>6165 (12625920 diff)</td></tr>
+	  <tr><td>Pool Shares Rejected:</td><td>92 (188416 diff)</td></tr>
+	  <tr><td>Status:</td><td><svg viewBox='0 0 100 100'><circle cx='50' cy='60' r='35' style='fill:yellow' /></svg> Non-Pooled Mode</td></tr>
+	  <tr><td>Pool Host:</td><td>tides.example.ca:28916</td></tr>
+	  <tr><td>Pool Tag:</td><td>"d8dd1618"</td></tr>
+	</body></html>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(page))
+	}))
+	defer srv.Close()
+
+	h, err := inspectGatewayFull(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("inspect: %v", err)
+	}
+	if !h.Unpooled {
+		t.Fatalf("status %q was not flagged as unpooled", h.Status)
+	}
+	// Counters alone say nothing is wrong here -- 6165 accepted, 92 refused
+	// -- which is the whole point: this failure is invisible to rejecting().
+	if h.rejecting() {
+		t.Error("unpooled gateway wrongly reported as rejecting; these are different failures")
+	}
+
+	cfg := config{
+		Pools: []poolConfig{{Name: "RIPTIDE", Host: "127.0.0.1", Port: 23336, StatusPort: 7154}},
+		Rigs:  []rigConfig{{Listen: "0.0.0.0:23401"}},
+	}
+	cfg.applyDefaults()
+	co := newCoordinator(cfg)
+	co.gw.set("RIPTIDE", *h)
+	if got := co.status().Pools[0].Name; got != "RIPTIDE" {
+		t.Errorf("pool name = %q, want the config label; the tag is the operator's own", got)
+	}
+
+	// A page whose status could not be parsed is unknown, not an outage.
+	if (gatewayHealth{}).unpooled() {
+		t.Error("blank status treated as unpooled")
+	}
+}
+
 func TestBoundToUsesTheSameNameAsThePool(t *testing.T) {
 	cfg := config{
 		Pools: []poolConfig{
@@ -197,8 +248,9 @@ func TestBoundToUsesTheSameNameAsThePool(t *testing.T) {
 	if len(doc.Rigs) != 1 || len(doc.Pools) != 2 {
 		t.Fatalf("unexpected shape: %d rigs, %d pools", len(doc.Rigs), len(doc.Pools))
 	}
-	if doc.Pools[1].Name != "TAG-B" {
-		t.Errorf("pool name = %q, want the gateway's tag", doc.Pools[1].Name)
+	// The tag does NOT rename the pool. The label is the operator's.
+	if doc.Pools[1].Name != "config-label-b" {
+		t.Errorf("pool name = %q, want the config label", doc.Pools[1].Name)
 	}
 	if doc.Rigs[0].BoundTo != doc.Pools[1].Name {
 		t.Errorf("BoundTo = %q but the pool is called %q; nothing can match these up",
@@ -213,8 +265,8 @@ func TestBoundToUsesTheSameNameAsThePool(t *testing.T) {
 	}
 	// Per-gateway rows carry the same name too, or the tables disagree with
 	// the diagram.
-	if doc.Rigs[0].Gateways[1].Pool != "TAG-B" {
-		t.Errorf("gateway row names the pool %q, want TAG-B", doc.Rigs[0].Gateways[1].Pool)
+	if doc.Rigs[0].Gateways[1].Pool != "config-label-b" {
+		t.Errorf("gateway row names the pool %q, want config-label-b", doc.Rigs[0].Gateways[1].Pool)
 	}
 }
 

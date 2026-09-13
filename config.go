@@ -36,10 +36,11 @@ type poolConfig struct {
 	// success. Requiring the page is the price of it never happening silently.
 	StatusPort int `json:"statusPort"`
 
-	// Name is what to call this pool. Filled in from the gateway's own pool
-	// tag rather than typed -- but kept editable, because a tag is whatever
-	// the pool operator chose and is sometimes a hostname or a handle rather
-	// than the pool's name.
+	// Name is what to call this pool, and the only source of its name at
+	// runtime. The setup form pre-fills it from the gateway's pool tag, but
+	// what is saved here is what is shown -- the tag is not re-read for it,
+	// because a gateway in non-pooled mode prints its own local tag in that
+	// field, and a pool once spent hours renamed to its operator.
 	Name string `json:"name,omitempty"`
 }
 
@@ -514,8 +515,8 @@ func (c *config) validateRaw() error {
 	return nil
 }
 
-// displayName is what to call a pool before its tag has been read, and in
-// error messages where a blank name would be useless.
+// displayName is the operator's label, falling back to the address so a pool
+// is never nameless.
 func (p poolConfig) displayName() string {
 	if p.Name != "" {
 		return p.Name

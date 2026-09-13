@@ -661,8 +661,12 @@ func fetchGatewayStatus(ctx context.Context, rawURL string) (*gatewayInfo, strin
 // each field states exactly where it ends.
 var (
 	poolHostRE = regexp.MustCompile(`Pool Host:\s*(\S+)`)
-	statusRE   = regexp.MustCompile(`Status:\s*([A-Za-z][A-Za-z ]*?)\s+Pool Host:`)
-	poolTagRE  = regexp.MustCompile(`Pool Tag:\s*"([^"]*)"`)
+	// The hyphen matters: "Non-Pooled Mode" is the status that means the
+	// gateway has lost its pool, and a class without it parsed that as an
+	// empty string -- so the one status worth catching was the one that
+	// vanished.
+	statusRE  = regexp.MustCompile(`Status:\s*([A-Za-z][A-Za-z -]*?)\s+Pool Host:`)
+	poolTagRE = regexp.MustCompile(`Pool Tag:\s*"([^"]*)"`)
 )
 
 func firstGroup(re *regexp.Regexp, text string) string {

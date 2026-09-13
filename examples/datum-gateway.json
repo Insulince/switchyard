@@ -1,0 +1,29 @@
+{
+  "bitcoind": {
+    "rpcuser": "datum",
+    "rpcpassword": "the node's rpc password",
+    "rpcurl": "http://your-node:8332",
+    "notify_fallback": true
+  },
+  "stratum": {
+    "listen_port": 23334
+  },
+  "mining": {
+    "pool_address": "your payout address for THIS pool",
+    "coinbase_tag_primary": "DATUM Gateway",
+    "coinbase_tag_secondary": "your tag"
+  },
+  "api": {
+    "admin_password": "",
+    "listen_port": 7152,
+    "modify_conf": false
+  },
+  "datum": {
+    "pool_host": "this pool's datum host",
+    "pool_port": 28915,
+    "pool_pubkey": "this pool's pubkey",
+    "pool_pass_workers": true,
+    "pool_pass_full_users": false,
+    "pooled_mining_only": true
+  }
+}

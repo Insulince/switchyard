@@ -35,6 +35,25 @@ type gatewayHealth struct {
 	PoolRejected uint64    `json:"poolRejected"`
 	Checked      time.Time `json:"checked,omitempty"`
 	Err          string    `json:"error,omitempty"`
+	// Unpooled is the gateway saying it has no pool. DATUM does not idle
+	// miners when its Prime connection fails; it falls back to solo mining
+	// under the local coinbase tag and keeps accepting shares as if nothing
+	// happened. Observed for nine hours on a live gateway whose Prime had
+	// been upgraded past it ("Bad configuration version from server"): every
+	// rotation onto that pool was a rotation onto solo, the pool-side
+	// accepted counter froze, and the card stayed green.
+	Unpooled bool `json:"unpooled,omitempty"`
+}
+
+// The one status DATUM prints when it is actually talking to its Prime.
+// Anything else -- "Non-Pooled Mode", "Connecting", a blank -- means the
+// shares this gateway takes are not reaching the pool switchyard thinks it
+// is feeding. A blank is treated as unknown rather than unpooled, so a page
+// whose layout switchyard could not parse does not read as an outage.
+const gatewayPooledStatus = "Connected and Ready"
+
+func (h gatewayHealth) unpooled() bool {
+	return h.Status != "" && h.Status != gatewayPooledStatus
 }
 
 // rejecting reports the case worth shouting about: the pool is refusing work
@@ -100,6 +119,11 @@ func (co *coordinator) watchGateways(ctx context.Context) {
 			co.gw.set(pool.Name, *info)
 			// Log the transition, not the state: an operator who has this
 			// dashboard closed should still find it in the journal.
+			if info.Unpooled && !was.Unpooled {
+				log.Printf("WARNING: gateway %s reports %q -- it has no pool and is solo mining "+
+					"under its own tag. Rotations onto it are not reaching %s.",
+					pool.Name, info.Status, pool.displayName())
+			}
 			if info.rejecting() && !was.rejecting() {
 				log.Printf("WARNING: pool behind %s is rejecting the work this gateway accepts "+
 					"(%d rejected vs %d accepted upstream). Check pool_pass_full_users on that gateway.",
@@ -141,6 +165,7 @@ func inspectGatewayFull(ctx context.Context, rawURL string) (*gatewayHealth, err
 		PoolRejected: firstUint(poolRejRE, text),
 		Checked:      time.Now(),
 	}
+	h.Unpooled = h.unpooled()
 	return h, nil
 }
 

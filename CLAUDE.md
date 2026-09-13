@@ -31,7 +31,8 @@ These are not style preferences. Each one was found by losing shares.
   `params[5]` on every submit. A rig that never asked sends five params and
   every share is rejected as `bad-version`. Enabling this speculatively is a
   100% reject rate, not a missed optimisation.
-- **`pool_pass_full_users` must be false on every gateway.** With it true, the
+- **`pool_pass_full_users` must be false on every gateway.** DATUM's default is
+  *true* -- do not describe false as the default anywhere. With it true, the
   gateway forwards the whole username and the pool credits whatever precedes
   the first dot -- so a worker name that is not a payout address loses every
   share while the gateway reports "Connected and Ready" and switchyard reports
@@ -107,7 +108,7 @@ CI passes it via `-ldflags "-X main.version=..."`. A working-tree build reports
 
 This repository runs against live mining hardware.
 
-- Only ever restart the switchyard container. **Never** restart `datum-gateway`
-  or `knots` without explicit permission -- a gateway restart tears down the
-  Prime session and shows the pool a real disconnect.
+- Restarting switchyard or a `datum-gateway` container is fine. **Never**
+  restart `knots` without explicit permission. A gateway restart does tear
+  down its Prime session and show the pool a real disconnect, so say so.
 - Always use `--no-deps` with compose commands.

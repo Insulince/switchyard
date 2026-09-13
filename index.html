@@ -128,6 +128,7 @@ header button.danger:hover { color: var(--bad); border-color: var(--bad); filter
   letter-spacing: 0.08em; color: var(--dim); margin: 0 0 0.5rem;
 }
 .label .hint { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--sentinel); margin-left: 0.5rem; }
+.label .hint.attn { color: var(--accent); }
 [title] { cursor: help; }
 header button[title], .tip[title] { cursor: pointer; }
 
@@ -490,6 +491,12 @@ header .help { margin-left: 0.35rem; }
 .node.arriving .where { color: var(--waiting); }
 .pending { color: var(--waiting); }
 .node.offline { border-color: var(--bad); }
+/* Amber, not red: the gateway is up and taking shares, it just is not
+   sending them where the card says. Red is reserved for the pool refusing. */
+.node.degraded { border-color: var(--accent); }
+/* The pool behind an unpooled gateway: nothing is wrong with the pool, it is
+   simply not connected, so it fades rather than alarms. */
+.node.pool.cut { border-color: var(--border); border-style: dashed; opacity: .55; }
 .node.hub { border-color: var(--accent); }
 .node.hub .n { color: var(--accent); }
 
@@ -508,6 +515,8 @@ header .help { margin-left: 0.35rem; }
    would be inventing a reading. */
 .link.beyond { stroke: var(--heartbeat); stroke-width: 1.4; opacity: .85; }
 .link.beyond.on { stroke: var(--good); opacity: .55; }
+.link.beyond.cut { stroke: var(--border); stroke-dasharray: 3 5; opacity: .7; }
+.linklabel.beyond.cut { fill: var(--border); }
 .linklabel.beyond { fill: var(--heartbeat); font-style: italic; }
 
 /* Port rows double as the anchor points for this rig's connectors. That is
@@ -673,19 +682,23 @@ details.sec > summary .label .hint { margin-left: 0.5rem; }
   position: absolute; top: 0.15rem; font-size: 0.66rem; color: var(--dim);
   font-variant-numeric: tabular-nums; white-space: nowrap;
 }
-/* lo needs an explicit left: an absolutely positioned element with left:auto
-   falls back to its static position, so lo and mid both sat at the left edge
-   and printed on top of each other. mid's left is set from JS, because where
-   the even split falls is not a constant -- see below. */
-.cscale .t.lo  { left: 0; }
-.cscale .t.mid { transform: translateX(-50%); }
-.cscale .t.hi  { right: 0; }
+/* Interior ticks are centred on a left set from JS -- where the even split
+   and the sigma breakpoints fall is not a constant, see the renderer. The two
+   ends are pinned to the edges instead, and need an explicit left/right: an
+   absolutely positioned element with left:auto falls back to its static
+   position, which once stacked lo and mid on top of each other. */
+.cscale .t { transform: translateX(-50%); }
+.cscale .t.lo  { left: 0; transform: none; }
+.cscale .t.hi  { right: 0; transform: none; }
 .cscale .t::before {
-  content: ""; position: absolute; top: -0.28rem; left: 0; width: 1px;
+  content: ""; position: absolute; top: -0.28rem; left: 50%; width: 1px;
   height: 0.22rem; background: rgba(255,255,255,.18);
 }
-.cscale .t.mid::before { left: 50%; }
-.cscale .t.hi::before  { left: auto; right: 0; }
+.cscale .t.lo::before { left: 0; }
+.cscale .t.hi::before { left: auto; right: 0; }
+/* Seven labels do not fit a phone-width track; the 2-sigma pair goes first,
+   since the amber/red boundary is the one nobody steers by. */
+@media (max-width: 900px) { .cscale .t.s2 { display: none; } }
 
 .cnum { font-size: 0.75rem; color: var(--dim); font-variant-numeric: tabular-nums; text-align: right; }
 .cnum b { color: var(--text); font-weight: 500; }
@@ -1176,13 +1189,14 @@ markOf(n, "<p><b>A DATUM gateway</b> running on this machine. This is what "
     n.appendChild(el("div", "n", p.gateway || p.name));
     n.appendChild(el("div", "gwaddr", p.addr || ""));
     var occ = el("div", "m"), now = el("div", "m"), diff = el("div", "m"), sh = el("div", "m");
+    var mode = el("div", "m");
     n.appendChild(occ); n.appendChild(now); n.appendChild(diff); n.appendChild(sh);
+    n.appendChild(mode);
     gws.appendChild(n);
-    // By index, like the rigs and for the same reason: a pool's displayed
-    // name is the gateway's coinbase tag, which arrives after the node was
-    // built and can change under it. A name-keyed lookup would silently miss
-    // from that moment on.
-    nodes.gws[j] = { box: n, occ: occ, now: now, diff: diff, sh: sh };
+    // By index, like the rigs: a rename in CONFIGURE changes the label under
+    // a node that already exists, and a name-keyed lookup would silently
+    // miss from that moment on.
+    nodes.gws[j] = { box: n, occ: occ, now: now, diff: diff, sh: sh, mode: mode };
   });
 
   // The pools carry only what an operator told us plus the long-run share,
@@ -1406,8 +1420,28 @@ markOf(n.sh, "<p>Shares this gateway <b>accepted</b> and <b>rejected</b> from an
       + "Rejects climbing steadily while accepts do not is the shape worth "
       + "acting on.</p>");
 
+    // The gateway's own verdict on its pool connection belongs on the
+    // GATEWAY card: it is the gateway that has lost its pool, and the pool
+    // itself knows nothing about it. DATUM does not idle miners when its
+    // Prime connection fails -- it solo mines under its own tag and keeps
+    // accepting shares, so every other number on this card stays healthy.
+    var unpooled = !!(p.health && p.health.unpooled);
+    if (unpooled) {
+      setMeta(n.mode, [{ tag: "span", cls: "warn",
+        text: p.health.status + " \u2014 solo mining \u2014 see DATUM Gateway log for more information" }]);
+markOf(n.mode, "<p><b>This gateway has no pool.</b> Its Prime connection is down "
+        + "and it has fallen back to solo mining under its own coinbase tag. "
+        + "Work rotated here is not reaching <span class=\"k\">" + p.name
+        + "</span>.</p>"
+        + "<p>The gateway's own log says why. A Prime upgraded past this "
+        + "gateway's version is the usual cause.</p>");
+    } else {
+      setMeta(n.mode, []);
+    }
+
     var cls = "node ";
     if (!p.ready) cls += "offline";
+    else if (unpooled) cls += "degraded";
     else if (p.occupants.length) cls += "live";
     else cls += "dark";
     // Preserve a running arrive/depart animation: className is rewritten every
@@ -1423,7 +1457,7 @@ markOf(n.sh, "<p>Shares this gateway <b>accepted</b> and <b>rejected</b> from an
   d.pools.forEach(function (p, j) {
     var n = nodes.pools[j];
     if (!n) return;
-    // The name is the gateway's tag and arrives after the node was built.
+    // The label can be edited under a node that already exists.
     var poolHeading = n.box.querySelector(".n");
     if (poolHeading && poolHeading.textContent !== p.name) poolHeading.textContent = p.name;
 
@@ -1494,7 +1528,8 @@ markOf(n.health, "<p>Could not read the gateway's status page:</p>"
       var bad = tot >= 5 && (h.poolRejected || 0) > (h.poolAccepted || 0);
       setMeta(n.health, [
         { tag: "span", cls: bad ? "off" : "ok", text: num(h.poolAccepted || 0) },
-        " taken by pool · ",
+        " taken by pool",
+        { tag: "br" },
         { tag: "span", cls: (h.poolRejected || 0) > 0 ? "warn" : "", text: num(h.poolRejected || 0) },
         " refused"
       ]);
@@ -1523,11 +1558,21 @@ markOf(n.health, "<p><b>What the POOL did with the work</b>, from the gateway's 
             : "<p>A handful of refusals is ordinary — shares in flight when "
               + "a gateway reconnects land too late. Refusals outrunning "
               + "acceptances is not.</p>")
+        + (h.unpooled
+            ? "<p><b>Nothing is reaching this pool right now.</b> Its gateway "
+              + "has lost its Prime connection and is solo mining; these "
+              + "counters are frozen where they were when that happened. See "
+              + "the gateway card.</p>"
+            : "")
         + (h.status ? "<p>Gateway reports: <span class=\"k\">" + h.status + "</span></p>" : ""));
     }
-    setClass(n.box, "node pool" + (p.occupants.length ? " live" : "")
+    // A pool its gateway cannot reach is drawn unreachable, not busy: no
+    // live border however many rigs sit on the gateway in front of it.
+    var cut = !!(h && h.unpooled);
+    setClass(n.box, "node pool" + (p.occupants.length && !cut ? " live" : "")
       + (h && !h.error && (h.poolAccepted || 0) + (h.poolRejected || 0) >= 5
-         && (h.poolRejected || 0) > (h.poolAccepted || 0) ? " offline" : ""));
+         && (h.poolRejected || 0) > (h.poolAccepted || 0) ? " offline"
+         : (cut ? " cut" : "")));
   });
 }
 
@@ -1742,13 +1787,18 @@ function drawLinks(d, entered, force) {
   d.pools.forEach(function (p, j) {
     var gn = nodes.gws[j], pn = nodes.pools[j];
     if (!gn || !pn) return;
-    var carrying = p.occupants.length > 0;
+    // An unpooled gateway has no link to draw as carrying, whatever sits on
+    // it: the hop is severed, and a pulsing teal line into a pool that is
+    // receiving nothing would be the exact invention this style exists to
+    // avoid.
+    var cut = !!(p.health && p.health.unpooled);
+    var carrying = p.occupants.length > 0 && !cut;
     var fr = gn.box.getBoundingClientRect(), tr = pn.box.getBoundingClientRect();
     var a = anchor(fr, host, tr), b = anchor(tr, host, fr);
     var pid = "lp" + (++pathSeq);
     var path = svgEl("path", {
       d: curve(a, b), id: pid,
-      "class": "link beyond" + (carrying ? " on" : "")
+      "class": "link beyond" + (carrying ? " on" : "") + (cut ? " cut" : "")
     });
     s.appendChild(path);
     // The last leg pulses too when it is carrying. Stopping the motion at the
@@ -1763,9 +1813,9 @@ function drawLinks(d, entered, force) {
     }
     var at = path.getPointAtLength(path.getTotalLength() * 0.5);
     var t = svgEl("text", {
-      x: at.x, y: at.y - 7, "class": "linklabel beyond", "text-anchor": "middle"
+      x: at.x, y: at.y - 7, "class": "linklabel beyond" + (cut ? " cut" : ""), "text-anchor": "middle"
     });
-    t.textContent = "via DATUM";
+    t.textContent = cut ? "not connected" : "via DATUM";
     s.appendChild(t);
     extras.push(t);
     if (carrying) deferred.push([path].concat(extras));
@@ -1925,6 +1975,17 @@ function renderConv(d) {
   var pct = function (v) {
     return Math.max(0, Math.min(100, ((v - lo) / (hi - lo)) * 100));
   };
+  // Axis labels are in TH/s, not percent of work. The bands are computed in
+  // percent because sigma is, but the reader is looking at hashrate bars and
+  // asks "what rate would put this pool in amber?" -- a percentage answers a
+  // question nobody asked.
+  //
+  // Precision follows sigma. Neighbouring labels are one sigma apart, and
+  // once that gap drops under a hundredth of a TH/s -- which a settled run
+  // reaches -- two decimals print the same number three times in a row.
+  var sigThs = d.totalThs * sig / 100;
+  var dp = sigThs > 0 ? Math.max(2, Math.ceil(-Math.log10(sigThs))) : 2;
+  var thsOf = function (v) { return (d.totalThs * v / 100).toFixed(dp); };
 
   // Before a full cycle there is no band, and saying so is the honest label --
   // a pool that has not had its turn is not behind, it is waiting.
@@ -1933,20 +1994,26 @@ function renderConv(d) {
   // share of work is 100% by definition and has no spread to measure. The
   // two-case version reported that as progress toward a threshold and counted
   // it as "3 of 1 rotations", which is both wrong and unreachable.
+  // Amber while there are no ranges to show. Before the first full cycle
+  // the chart is three grey bars and nothing else, and the reason lives in
+  // this one line -- as dim hint text it read as decoration and the empty
+  // chart read as broken.
+  var waiting = d.pools.length >= 2 && !sig;
+  setClass($("convHint"), "hint" + (waiting ? " attn" : ""));
   $("convHint").textContent = d.pools.length < 2
     ? "one pool — all work goes here, so there is nothing to compare"
     : sig
-      ? ("±1σ = " + sig.toFixed(2) + " pts — the band narrows as "
+      ? ("±1σ = " + sig.toFixed(2) + " pts — the ranges narrow as "
          + "rotations accumulate, and the axis zooms with it")
-      : ("no band until every pool has had a turn · " + d.rotations
-         + " of " + d.pools.length);
+      : ("no ranges yet — they appear once every pool has had a turn · "
+         + d.rotations + " of " + d.pools.length + " rotations");
   // Spelled out in the legend as well as on the marks, because the width of
   // the band is the number that tells you how much this section currently
   // knows -- and it is the first thing to check when a colour looks wrong.
   $("legendVals").textContent = sig
     ? ("1\u03c3 = \u00b1" + sig.toFixed(2) + " pts \u00b7 \u00b1"
-       + ths(d.totalThs * sig / 100) + " TH/s \u00b7 axis spans "
-       + lo.toFixed(1) + "\u2013" + hi.toFixed(1) + "% of total work")
+       + ths(d.totalThs * sig / 100) + " TH/s \u00b7 axis "
+       + thsOf(lo) + "\u2013" + thsOf(hi) + " TH/s")
     : "";
 
   d.pools.forEach(function (p) {
@@ -2014,7 +2081,7 @@ markOf(exp, "<p><b>Even split</b> <span class=\"k\">" + p.expectedPct.toFixed(2)
     var dev = p.sharePct - p.expectedPct;
     var dv = el("span", "dev " + g, p.sigmaPct
       ? ((p.sigmas >= 0 ? "+" : "\u2212") + Math.abs(p.sigmas).toFixed(1) + "\u03c3")
-      : d.pools.length < 2 ? "all of it" : "no band yet");
+      : d.pools.length < 2 ? "all of it" : "no ranges yet");
     dv.title = (dev >= 0 ? "+" : "\u2212") + Math.abs(dev).toFixed(2) + " points from an even split"
       + (p.sigmaPct ? ", against a \u00b1" + p.sigmaPct.toFixed(2) + " point band" : "");
     n.appendChild(dv);
@@ -2029,25 +2096,38 @@ markOf(exp, "<p><b>Even split</b> <span class=\"k\">" + p.expectedPct.toFixed(2)
     var sc = el("div", "cscale");
     sc.appendChild(el("div"));
     var track = el("div", "track");
-    track.appendChild(el("span", "t lo", lo.toFixed(1) + "%"));
+    track.appendChild(el("span", "t lo", thsOf(lo)));
 
-    // THE EVEN SPLIT IS NOT THE MIDDLE OF THE AXIS.
+    // One label per band boundary, so every colour edge above has the rate
+    // that crosses it written underneath.
     //
-    // The window is even +/- 3.2 sigma, which looks symmetric and usually is
-    // -- but it is clamped at zero, because a share of total work cannot be
-    // negative. Early on sigma is enormous (tens of points), the left arm
-    // hits the clamp, and the window goes lopsided: 0% to 90.6% around an
-    // even split of 33.3%, which sits at 37% of the axis rather than 50%.
-    // A hardcoded 50% put the label a fifth of the axis away from the tick
-    // it names, and the discrepancy was largest exactly when the chart is
-    // least settled and most in need of being read carefully.
+    // NONE OF THESE SIT AT A FIXED FRACTION OF THE AXIS. The window is even
+    // +/- 3.2 sigma, which looks symmetric and usually is -- but it is
+    // clamped at zero, because a share of total work cannot be negative, and
+    // widened when a pool wanders past it. Early on sigma is enormous, the
+    // left arm hits the clamp, and the window goes lopsided: 0% to 90.6%
+    // around an even split of 33.3%, which sits at 37% of the axis rather
+    // than 50%. A hardcoded 50% once put the label a fifth of the axis away
+    // from the tick it names. pct() already maps a value to its position;
+    // use it for all of them.
     //
-    // pct() already maps a value to its position. Use it.
-    var mid = el("span", "t mid", even.toFixed(1) + "%");
-    mid.style.left = pct(even) + "%";
-    track.appendChild(mid);
+    // A breakpoint the clamp pushed outside the window, or one that would
+    // print on top of its neighbour, is dropped rather than drawn wrong.
+    var placed = [0, 100];
+    [[even - 2 * sig, "s2"], [even - sig, "s1"], [even, "mid"],
+     [even + sig, "s1"], [even + 2 * sig, "s2"]].forEach(function (b) {
+      var v = b[0], x = pct(v);
+      if (v <= lo || v >= hi) return;
+      for (var i = 0; i < placed.length; i++) {
+        if (Math.abs(placed[i] - x) < 5) return;
+      }
+      placed.push(x);
+      var t = el("span", "t " + b[1], thsOf(v));
+      t.style.left = x + "%";
+      track.appendChild(t);
+    });
 
-    track.appendChild(el("span", "t hi", hi.toFixed(1) + "%"));
+    track.appendChild(el("span", "t hi", thsOf(hi)));
     sc.appendChild(track);
     // The legend above already carries the sigma, its TH/s equivalent and the
     // span, so this column stays empty rather than saying it again. It also

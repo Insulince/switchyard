@@ -10,3 +10,13 @@ updates:
       interval: monthly
     commit-message:
       prefix: ci
+    # ONE PR A MONTH, NOT ONE PER ACTION.
+    #
+    # The first run opened five separate pull requests that turned out to be
+    # the same change five times over -- every one of them a Node 20 to Node 24
+    # runtime bump. Reviewing that five times is four times too many, and five
+    # PRs against the same two files means four of them need a rebase after the
+    # first is merged.
+    groups:
+      actions:
+        patterns: ["*"]

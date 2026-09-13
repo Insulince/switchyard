@@ -1,0 +1,43 @@
+# Let Dependabot's routine updates merge themselves once CI is green.
+#
+# WHY THIS IS NOT ALL UPDATES. Patch and minor bumps are merged unattended;
+# a MAJOR is left open for a person to look at. That split is not caution for
+# its own sake -- CI here builds and tests the Go program, which exercises
+# actions/checkout and actions/setup-go and nothing else. Every other action
+# in this repo appears only in release.yml, which runs on a tag and therefore
+# never on a pull request. A green check on a docker/* or action-gh-release
+# bump is real information about the build and no information at all about the
+# release pipeline, so a major version of one of those gets a human.
+name: dependabot auto-merge
+
+on: pull_request_target
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # --auto queues the merge behind the branch's required checks rather
+      # than merging now, so this never lands anything CI has not passed.
+      - if: steps.meta.outputs.update-type != 'version-update:semver-major'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        run: |
+          gh pr comment "$PR_URL" --body \
+            "Major version bump — left for review. CI covers the Go build but not \`release.yml\`, which only runs on a tag."
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

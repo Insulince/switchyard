@@ -1,0 +1,58 @@
+# The whole stack: one DATUM gateway per pool, plus switchyard, all on one
+# network and all against a node you already run. Adding a pool is copying
+# one gateway block and one config file.
+#
+# datum_gateway ships a Dockerfile but no published image, so `build` points
+# at a checkout of https://github.com/OCEAN-xyz/datum_gateway. Each gateway
+# reads /app/config/config.json; see datum-gateway.json for the per-pool
+# fields.
+#
+# Inside the network nothing needs distinct ports -- every gateway can listen
+# on 23334 and 7152, because each has its own container. Only the host-side
+# publishes have to differ, and only switchyard's are actually needed.
+
+services:
+  gateway-a:
+    build: ./datum_gateway
+    restart: unless-stopped
+    volumes:
+      - ./gateways/pool-a:/app/config
+    networks: [mining]
+
+  gateway-b:
+    build: ./datum_gateway
+    restart: unless-stopped
+    volumes:
+      - ./gateways/pool-b:/app/config
+    networks: [mining]
+
+  gateway-c:
+    build: ./datum_gateway
+    restart: unless-stopped
+    volumes:
+      - ./gateways/pool-c:/app/config
+    networks: [mining]
+
+  switchyard:
+    image: ghcr.io/insulince/switchyard:latest
+    restart: unless-stopped
+    volumes:
+      - ./switchyard:/config          # the directory, not the file
+    ports:
+      - "7160:7160"                   # dashboard
+      - "23401-23402:23401-23402"     # one per rig
+    networks: [mining]
+
+# In switchyard, each pool is then:
+#   host: gateway-a   port: 23334   statusPort: 7152
+#
+# If your node is a container, put it on this network too and use its
+# service name in each gateway's bitcoind.rpcurl. If it runs on the host, use
+# the host's LAN address -- 127.0.0.1 inside a container is the container.
+#
+# blocknotify in bitcoin.conf can name only one URL. Either leave
+# notify_fallback true in every gateway config, or make blocknotify a script
+# that hits http://gateway-{a,b,c}:7152/NOTIFY in turn.
+
+networks:
+  mining:
