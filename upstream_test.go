@@ -94,6 +94,39 @@ func TestUnparseableDifficultyIsRejected(t *testing.T) {
 	}
 }
 
+// Difficulty is a number, not an integer. A DATUM build that converts its
+// power-of-two pool difficulty to true Bitcoin difficulty sends 1024 as
+// 1023.984375 and 1 as 0.9999847412109375. Both must reach the rig exactly
+// as sent -- the rig's target has to match the gateway's -- and credit as
+// whole units for accounting. Rejecting them left rigs at difficulty 1 and a
+// 96% high-hash reject rate on three live gateways.
+func TestFractionalDifficultyIsForwardedExactly(t *testing.T) {
+	u := newUpstream(newCoordinator(testConfig()), 0, testConfig().Rigs[0], testConfig().Pools[0])
+	for _, tc := range []struct {
+		wire  string
+		want  uint64
+		relay string
+	}{
+		{"1023.984375", 1024, "1023.984375"},
+		{"0.9999847412109375", 1, "0.9999847412109375"},
+		{"4096", 4096, "4096"},
+		{"0.5", 1, "0.5"},
+	} {
+		line := []byte(`{"id":null,"method":"mining.set_difficulty","params":[` + tc.wire + `]}`)
+		var m message
+		if err := json.Unmarshal(line, &m); err != nil {
+			t.Fatal(err)
+		}
+		u.handleNotification(&m, line)
+		if u.diff != tc.want {
+			t.Errorf("%s: credited diff = %d, want %d", tc.wire, u.diff, tc.want)
+		}
+		if !strings.Contains(string(u.lastDiff), `"params":[`+tc.relay+`]`) {
+			t.Errorf("%s: relayed %q, want the exact value", tc.wire, u.lastDiff)
+		}
+	}
+}
+
 func testConfig() config {
 	c := config{
 		StatusListen: "127.0.0.1:0",

@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -415,12 +417,21 @@ func (u *upstream) handleNotification(m *message, line []byte) {
 		// floods the gateway with shares four thousand times too easy. Since
 		// nothing downstream can detect the mistake, nothing we cannot parse
 		// is allowed to become a difficulty in the first place.
-		d, ok := paramUintAt(m.Params, 0)
-		if !ok || d == 0 {
+		f, ok := paramNumberAt(m.Params, 0)
+		if !ok || !(f > 0) || math.IsInf(f, 0) {
 			u.logf("ignoring unparseable set_difficulty: %s", truncate(line, 120))
 			return
 		}
-		line = []byte(fmt.Sprintf(`{"id":null,"method":"mining.set_difficulty","params":[%d]}`, d))
+		// Forward the exact value the gateway chose; the rig's target must
+		// match the gateway's or shares are rejected. Accounting keeps whole
+		// units -- 1023.984375 credits as 1024, which is what a human reads
+		// on the card and is within a fifteen-thousandth of the truth.
+		line = []byte(fmt.Sprintf(`{"id":null,"method":"mining.set_difficulty","params":[%s]}`,
+			strconv.FormatFloat(f, 'f', -1, 64)))
+		d := uint64(math.Round(f))
+		if d == 0 {
+			d = 1
+		}
 
 		u.mu.Lock()
 		changed := u.diff != d

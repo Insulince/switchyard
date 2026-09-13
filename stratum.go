@@ -107,15 +107,20 @@ func paramStringAt(params json.RawMessage, n int) (string, bool) {
 	return s, true
 }
 
-// paramUintAt pulls the nth element as an unsigned integer. Difficulty is
-// sent as a bare JSON number, so this is how mining.set_difficulty is read
-// for display without re-parsing the whole message.
-func paramUintAt(params json.RawMessage, n int) (uint64, bool) {
+// paramNumberAt pulls the nth element as a JSON number. This is how
+// mining.set_difficulty is read, and it MUST accept fractions: stratum
+// difficulty is a number, not an integer, and a gateway that converts its
+// power-of-two pool difficulty to true Bitcoin difficulty sends 1024 as
+// 1023.984375. An integer-only parse dropped every one of those, the rig
+// fell back to difficulty 1, and the gateway rejected 96% of what it sent
+// as high-hash. Nothing downstream could tell -- the miner was happy and the
+// pool-side counters looked fine.
+func paramNumberAt(params json.RawMessage, n int) (float64, bool) {
 	raw, ok := paramsAt(params, n)
 	if !ok {
 		return 0, false
 	}
-	var v uint64
+	var v float64
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return 0, false
 	}
