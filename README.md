@@ -29,6 +29,7 @@ neither knows nor cares which pools you use.
 **[Gateway requirement](#one-requirement-on-your-gateways)** ·
 **[Running it](#running-it)** · **[Configuring it](#configuring-it)** ·
 **[Behaviour worth knowing](#behaviour-worth-knowing)** ·
+**[Rented hashrate](#rented-hashrate)** ·
 **[Is it trustworthy?](#switchyard-is-a-man-in-the-middle)** ·
 **[Is this hash-hopping?](#this-is-not-a-hash-hopping-tool)**
 
@@ -173,9 +174,48 @@ StartOS or Umbrel, which are built around one instance of each app, it means
 sideloading extra gateways; it can be done, but it is outside what these docs
 cover.
 
-**One miner per rig port.** A listener port is bound to whichever miner most
-recently subscribed on it; a second miner on the same port displaces the
-first. Give every rig its own port.
+**One miner per port.** That is the recommended setup and the one every
+other part of these docs assumes. On a port with a single miner, switchyard
+forwards your worker name, your difficulty and your shares byte for byte,
+with one exception you should know about: **one byte of the gateway's
+extranonce is reserved on every port**, so your miner is handed a 7-byte
+extranonce2 rather than the gateway's 8, and switchyard restores the byte on
+each share before it reaches the gateway. That is 2^56 coinbase variants per
+job -- no hardware comes near it -- and it is what makes a second miner
+possible later without disturbing the first. Nothing else is rewritten.
+
+**A port can hold more than one miner, and then switchyard does things on
+your behalf.** Whatever is on a port is one rig to switchyard -- one gateway
+session, one difficulty, one share of the rotation -- which is what makes a
+rented fleet or a rack of small machines behave as a single unit. To make
+several miners fit in one gateway session, switchyard has to intervene, and
+you should know exactly how:
+
+- **Extranonce is sliced.** The gateway hands the port one extranonce. Each
+  miner is given that extranonce plus one extra byte of its own, and one byte
+  less of extranonce2 to search, so no two miners on a port can ever produce
+  the same work. Switchyard puts the byte back on every share before it
+  reaches the gateway. Up to 256 miners per port; a gateway that leaves no
+  byte to spare holds one miner per port and refuses a second.
+- **One worker name goes upstream.** The first miner to authorise on a port
+  sets the name the gateway sees. Every miner that joins after is recorded as
+  a member of that port and is shown on the dashboard by its own name, but
+  the gateway and the pool see one worker. Pool-side hashrate and share
+  counts are the port's, not each machine's.
+- **Members are remembered.** After a rotation every miner on the port
+  reconnects, and whichever is first back is momentarily alone. Because it is
+  on the port's roster the identity does not change. A name never seen on the
+  port before, arriving on an empty port, is treated as a rename and does
+  update the identity -- which is how a lone miner you have renamed is still
+  honoured.
+- **Nothing is ever evicted.** Not by a new subscriber, not by a reconnect
+  with the same name. A dead socket is reaped by TCP keepalive or by the next
+  rotation. Behind a Docker published port every miner shares one source
+  address, and rented hashrate shares one worker name, so any "this must be
+  a reconnect" guess would eventually close a live miner.
+
+If you do not need miners moved together, give each its own port and none of
+the above applies to you.
 
 Also **`pool_pass_full_users: false`** on every gateway. **DATUM's default is
 `true`**, and its example config ships with `true`, so this is a change you
@@ -401,6 +441,50 @@ defaulting to `config.json` in the working directory.
 - **The dark slot is real.** Pools that flag idle workers on share submission
   will see a gap on their dashboard; connection liveness doesn't help, because
   the discriminator is shares.
+
+---
+
+## Rented hashrate
+
+Renting hashrate *in* -- from MiningRigRentals or anywhere that lets you
+supply a stratum endpoint -- is the case fan-in exists for. You give the
+renter one `stratum+tcp://host:port` and you do not know, and cannot control,
+how many machines will connect to it. Point that endpoint at one switchyard
+port and the rental is one virtual rig, rotated across your pools like any
+other. Before you do, know these things:
+
+- **One port per rental.** The renter's fleet shares a port; it is scheduled,
+  bound and rotated as one unit. Do not mix your own machines onto it.
+  Everything in [What you need](#what-you-need) about multi-miner ports
+  applies: extranonce is sliced, nothing is evicted, and the gateway sees one
+  worker.
+- **The worker name upstream is whatever the renter sends first.** Rental
+  platforms typically send a name of their own choosing, and the first
+  connection sets the port's identity for the whole rental. Because
+  `pool_pass_full_users` is false on your gateways, that name is a label only;
+  the gateway pays the address in *its* config, so who the renter claims to be
+  cannot redirect the payout. Do check your pool dashboards for that label
+  rather than your own, so you are not alarmed when it appears.
+- **Rotation costs the renter's machines a reconnect too.** Every block, the
+  whole fleet is dropped and reconnects. Firmware you have never seen decides
+  how long that takes; the **Rotation cost** card measures it, and it is a
+  larger fraction of a short rental than of a long one. Raise
+  `minDwellSeconds` if the measured cost is not worth it.
+- **Rental platforms watch for the endpoint going away.** A rig that finds
+  your endpoint unreachable for long enough is treated as an outage on your
+  side, which can cancel the rental and refund the renter. A switchyard
+  restart or a config reload drops every miner briefly; a gateway falling
+  over drops the port until switchyard rebinds it elsewhere. Neither is long,
+  but do not schedule maintenance on top of a paid rental.
+- **You cannot see the rented machines individually.** The dashboard lists
+  them by the names they authorise with, but hashrate, difficulty and share
+  counts are the port's. Per-machine accounting is the platform's job, not
+  switchyard's.
+- **Up to 256 connections per port.** A larger fleet needs a second port and a
+  second rental, or the renter's own proxy in front.
+
+Renting *out* through switchyard is not a supported arrangement: the renter
+chooses the pool, which is the one decision switchyard exists to take away.
 
 ---
 

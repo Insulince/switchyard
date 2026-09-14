@@ -241,7 +241,7 @@ func TestBoundToUsesTheSameNameAsThePool(t *testing.T) {
 
 	// Bind the rig to the second pool, the way a real session would.
 	co.mu.Lock()
-	co.sessions[0] = &rigSession{co: co, rigIdx: 0, up: co.ups[0][1]}
+	co.sessions[0] = []*rigSession{{co: co, rigIdx: 0, up: co.ups[0][1]}}
 	co.mu.Unlock()
 
 	doc := co.status()

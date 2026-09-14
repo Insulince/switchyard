@@ -2,10 +2,15 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/iotest"
+	"time"
 )
 
 // The bug this guards against cost three hours of a rig hashing at difficulty
@@ -135,4 +140,70 @@ func testConfig() config {
 	}
 	c.applyDefaults()
 	return c
+}
+
+// A config reload cancels the old generation's context. Its gateway sessions
+// must die with it: readLoop blocks on the socket, so if nothing closes that
+// socket the old coordinator keeps receiving notifies and keeps rotating in
+// parallel with the new one. Seen live as two "new block -> rotation" lines
+// for one block, with different layouts.
+func TestCancelledGenerationHangsUpOnTheGateway(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	gone := make(chan struct{})
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		sc := bufio.NewScanner(conn)
+		// Answer subscribe and authorize, then just hold the line open.
+		for sc.Scan() {
+			var m message
+			_ = json.Unmarshal(sc.Bytes(), &m)
+			switch m.Method {
+			case "mining.subscribe":
+				fmt.Fprintf(conn, `{"id":%s,"result":[[],"a1b2c3d4",8],"error":null}`+"\n", m.ID)
+			case "mining.authorize":
+				fmt.Fprintf(conn, `{"id":%s,"result":true,"error":null}`+"\n", m.ID)
+			}
+		}
+		close(gone) // the client hung up
+	}()
+
+	cfg := testConfig()
+	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+	cfg.Pools[0].Port = port
+	co := newCoordinator(cfg)
+	co.creds[0].set("rig", "x")
+	u := co.ups[0][0]
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { u.run(ctx); close(done) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !u.isReady() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !u.isReady() {
+		t.Fatal("upstream never became ready against the fake gateway")
+	}
+
+	cancel()
+	select {
+	case <-gone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("generation cancelled but the gateway session stayed open")
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("run() did not return after cancel")
+	}
 }

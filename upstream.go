@@ -70,9 +70,23 @@ type upstream struct {
 	configureResult json.RawMessage
 	lastDiff        []byte
 	lastNotify      []byte
-	sess            *rigSession
-	nextID          uint64
-	pending         map[uint64]pendingSubmit
+	// sessions is every miner currently bound here, each with the one-byte
+	// extranonce2 prefix that is its private slice of this upstream's nonce
+	// space -- or noPrefix, when the gateway left no byte to spare.
+	//
+	// A port is a VIRTUAL rig. Whatever hardware is behind it -- one ASIC,
+	// or fifty rented machines -- is one entity to switchyard: one gateway
+	// session, one difficulty, one line in every table. The gateway hands
+	// this session an extranonce1 and an 8-byte extranonce2; switchyard
+	// keeps the first byte of extranonce2 for itself and gives each miner
+	// extranonce1+prefix with a 7-byte extranonce2. Nonce spaces are
+	// disjoint by construction, so two miners on one port can never
+	// duplicate work, and a submit is rebuilt to the gateway's shape by
+	// putting the prefix back. This is what every stratum proxy does; it is
+	// what the gateway itself does to the miners behind it.
+	sessions map[*rigSession]int
+	nextID   uint64
+	pending  map[uint64]pendingSubmit
 
 	// Counters for the status view. These are per (rig, pool) because that is
 	// the pairing an operator reasons about: "how is this rig doing on this
@@ -131,12 +145,35 @@ type upstream struct {
 
 func newUpstream(co *coordinator, rigIdx int, rig rigConfig, pool poolConfig) *upstream {
 	return &upstream{
-		pool:    pool,
-		rig:     rig,
-		rigIdx:  rigIdx,
-		co:      co,
-		pending: map[uint64]pendingSubmit{},
+		pool:     pool,
+		rig:      rig,
+		rigIdx:   rigIdx,
+		co:       co,
+		pending:  map[uint64]pendingSubmit{},
+		sessions: map[*rigSession]int{},
 	}
+}
+
+// noPrefix marks a session bound without an extranonce slice, which only
+// happens when a gateway's extranonce2 is a single byte and there is nothing
+// to split. That upstream then behaves as it always did: one miner, and a
+// new subscriber displaces it.
+const noPrefix = -1
+
+// prefixBytes is how much of the gateway's extranonce2 switchyard keeps.
+// One byte is 256 miners per port, and leaves 7 bytes of rolling space --
+// more than any firmware uses.
+const prefixBytes = 1
+
+// sessionsLocked snapshots the bound sessions. Caller holds u.mu; the copy is
+// so the caller can drop the lock before touching a session, since a
+// session's own goroutine calls back into detach as it unwinds.
+func (u *upstream) sessionsLocked() []*rigSession {
+	out := make([]*rigSession, 0, len(u.sessions))
+	for s := range u.sessions {
+		out = append(out, s)
+	}
+	return out
 }
 
 // dropForReauth closes this upstream's socket so its run loop reconnects and
@@ -207,6 +244,12 @@ func (u *upstream) session(ctx context.Context) error {
 		return fmt.Errorf("dial %s: %w", u.pool.stratumAddr(), err)
 	}
 	defer conn.Close()
+	// readLoop blocks on the socket, not on ctx. Without this a cancelled
+	// generation (a config reload) leaves its gateway sessions alive: they
+	// keep receiving notifies and keep rotating a coordinator nothing is
+	// attached to any more, in parallel with the live one.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 
 	u.mu.Lock()
 	u.conn, u.w = conn, newConnWriter(conn)
@@ -222,12 +265,12 @@ func (u *upstream) session(ctx context.Context) error {
 		if u.w != nil {
 			u.w.close()
 		}
-		sess := u.sess
+		bound := u.sessionsLocked()
 		u.mu.Unlock()
 		// A rig bound to a gateway we just lost is holding a dead route.
 		// Drop it so it reconnects and gets rebound to a live gateway.
-		if sess != nil {
-			sess.close()
+		for _, s := range bound {
+			s.close()
 		}
 	}()
 
@@ -404,10 +447,10 @@ func (u *upstream) handleNotification(m *message, line []byte) {
 		// job arrives, and every caller getting the ownership right is a
 		// weaker guarantee than not needing them to.
 		u.lastNotify = append([]byte(nil), line...)
-		sess := u.sess
+		bound := u.sessionsLocked()
 		u.mu.Unlock()
-		if sess != nil {
-			sess.push(line)
+		for _, s := range bound {
+			s.push(line)
 		}
 
 	case "mining.set_difficulty":
@@ -437,7 +480,7 @@ func (u *upstream) handleNotification(m *message, line []byte) {
 		changed := u.diff != d
 		u.lastDiff = line
 		u.diff = d
-		sess := u.sess
+		bound := u.sessionsLocked()
 		u.mu.Unlock()
 		// Difficulty is the one push worth logging: it is rare, and a rig
 		// working at a difficulty the gateway is not expecting is invisible
@@ -445,8 +488,8 @@ func (u *upstream) handleNotification(m *message, line []byte) {
 		if changed {
 			u.logf("difficulty now %s", truncate(line, 120))
 		}
-		if sess != nil {
-			sess.push(line)
+		for _, s := range bound {
+			s.push(line)
 		}
 
 	case "mining.set_extranonce":
@@ -463,11 +506,11 @@ func (u *upstream) handleNotification(m *message, line []byte) {
 					u.extranonce2Size = n
 				}
 			}
-			sess := u.sess
+			bound := u.sessionsLocked()
 			u.mu.Unlock()
 			u.logf("extranonce reassigned to %s; rebinding rig", en1)
-			if sess != nil {
-				sess.close()
+			for _, s := range bound {
+				s.close()
 			}
 		}
 
@@ -525,6 +568,17 @@ func (u *upstream) submit(sess *rigSession, downID json.RawMessage, params json.
 		u.mu.Unlock()
 		return fmt.Errorf("gateway %s not ready", u.pool.Name)
 	}
+	// Put the prefix back. The miner rolled its 7 bytes; the gateway
+	// expects the 8 it handed out, and the leading byte is the one that
+	// says which miner this was.
+	if prefix, ok := u.sessions[sess]; ok && prefix != noPrefix {
+		en2, _ := paramStringAt(params, 2)
+		fixed, err = replaceParamAt(fixed, 2, fmt.Sprintf("%02x", prefix)+en2)
+		if err != nil {
+			u.mu.Unlock()
+			return fmt.Errorf("rewriting extranonce2: %w", err)
+		}
+	}
 	u.nextID++
 	u.submitted++
 	id := u.nextID + 100 // stay clear of the handshake ids
@@ -544,20 +598,68 @@ func (u *upstream) attach(sess *rigSession) (en1 string, en2 int, configure json
 		u.mu.Unlock()
 		return "", 0, nil, false
 	}
-	old := u.sess
-	u.sess = sess
-	u.boundAt = time.Now()
-	// Start this visit's rate measurement from empty. Work from the last time
-	// this rig sat here is not evidence about what is flowing now.
-	u.buckets = [rateBuckets]uint64{}
-	u.bucketAt, u.bucketStart = 0, time.Time{}
-	en1, en2, configure = u.extranonce1, u.extranonce2Size, u.configureResult
-	u.mu.Unlock()
-
-	if old != nil && old != sess {
-		old.close()
+	prefix := noPrefix
+	if u.extranonce2Size > prefixBytes {
+		// Lowest free byte. Freed slots are reused, so a miner that
+		// reconnects all day does not walk the space.
+		taken := make([]bool, 256)
+		for _, p := range u.sessions {
+			if p >= 0 {
+				taken[p] = true
+			}
+		}
+		for p := 0; p < 256; p++ {
+			if !taken[p] {
+				prefix = p
+				break
+			}
+		}
+		if prefix == noPrefix {
+			u.mu.Unlock()
+			u.logf("all 256 extranonce slots taken; refusing another miner")
+			return "", 0, nil, false
+		}
+	} else if len(u.sessions) > 0 {
+		// Nothing to split, so the port holds one miner -- and it is the
+		// one already hashing. Refusing the newcomer is the same rule as
+		// everywhere else: nothing on a port is ever evicted.
+		u.mu.Unlock()
+		u.logf("gateway leaves no extranonce byte to split; refusing a second miner")
+		return "", 0, nil, false
 	}
+	if len(u.sessions) == 0 {
+		u.boundAt = time.Now()
+		// Start this visit's rate measurement from empty. Work from the
+		// last time this rig sat here is not evidence about what is flowing
+		// now. Only on the FIRST miner: a second one joining a live port is
+		// adding to a measurement, not starting one.
+		u.buckets = [rateBuckets]uint64{}
+		u.bucketAt, u.bucketStart = 0, time.Time{}
+	}
+	u.sessions[sess] = prefix
+	en1, en2, configure = u.extranonce1, u.extranonce2Size, u.configureResult
+	if prefix != noPrefix {
+		en1 += fmt.Sprintf("%02x", prefix)
+		en2 -= prefixBytes
+	}
+	u.mu.Unlock()
 	return en1, en2, configure, true
+}
+
+// There is deliberately NO reconnect eviction. "Same worker name from the
+// same address" was tried and displaced the wrong miner: behind Docker's
+// published port every external miner arrives from the bridge address, and
+// rented hashrate routinely shares one worker name. A stale session -- a
+// miner that vanished without closing its socket -- is reaped by TCP
+// keepalive within a couple of minutes and by the next rotation regardless;
+// until then it shows as one more miner on the port, and holds one of 256
+// slots. That is cheaper than ever closing a live miner by mistake.
+
+// minerCount is how many miners are bound to this upstream right now.
+func (u *upstream) minerCount() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return len(u.sessions)
 }
 
 // primeSession sends the current difficulty and job to a freshly bound rig.
@@ -582,8 +684,8 @@ func (u *upstream) primeSession(sess *rigSession) {
 
 func (u *upstream) detach(sess *rigSession) {
 	u.mu.Lock()
-	if u.sess == sess {
-		u.sess = nil
+	delete(u.sessions, sess)
+	if len(u.sessions) == 0 {
 		u.boundAt = time.Time{}
 	}
 	// Shares still in flight for a session that just went away have nowhere
@@ -720,7 +822,7 @@ func (u *upstream) advanceLocked(now time.Time) {
 const minRateSpan = 60 * time.Second
 
 func (u *upstream) recentThsLocked(now time.Time) float64 {
-	if u.sess == nil || u.boundAt.IsZero() {
+	if len(u.sessions) == 0 || u.boundAt.IsZero() {
 		return 0
 	}
 	u.advanceLocked(now)

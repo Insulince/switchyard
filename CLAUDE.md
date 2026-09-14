@@ -46,9 +46,26 @@ These are not style preferences. Each one was found by losing shares.
   by worker name. A gateway dialled only while a rig points at it would reset
   difficulty to the floor on every rotation.
 - **Binding is deferred until `mining.subscribe`.** Miners open a second silent
-  TCP connection alongside the real one. Binding at accept time lets the probe
-  evict the hashing session, which makes the miner reconnect, which opens
-  another probe.
+  TCP connection alongside the real one. Binding at accept time would have the
+  probe take an extranonce slot and appear as a miner.
+- **A port is a virtual rig; miners on it are partitioned by extranonce.**
+  Each session gets `extranonce1 + one prefix byte` and a 7-byte extranonce2;
+  `submit` puts the byte back. Nothing on a port is ever evicted -- not by a
+  new subscriber, not by a same-name reconnect. Both were tried: behind a
+  published Docker port every miner has the same source address, so any
+  reconnect heuristic closes a live miner. Dead sockets are reaped by TCP
+  keepalive and by the next rotation.
+- **A port's upstream identity is sticky; the roster decides renames.** The
+  first miner to authorise sets the name; later names are recorded as members
+  (`credState.members`). After a rotation the fleet races back and whoever is
+  first is alone on the port -- treating that as "a lone miner renamed itself"
+  re-authorised every gateway session and dropped the port for the miners'
+  30 s retry backoff, on a coin flip, every block. Only a name *never seen on
+  the port*, arriving on an *empty* port, changes the identity.
+- **Upstream sockets must be closed on context cancel** (`context.AfterFunc`
+  in `upstream.session`). `readLoop` blocks on the socket, not the context;
+  without this a config reload leaves the old generation's gateway sessions
+  alive and rotating a coordinator nothing is attached to.
 - **Config parsing rejects unknown keys.** A hand-edited file that silently
   ignores a typo is worse than one that refuses to start. Do not relax this.
 

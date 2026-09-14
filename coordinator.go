@@ -39,7 +39,10 @@ type coordinator struct {
 	rotations    int
 	lastPrevhash string
 	lastRotate   time.Time
-	sessions     []*rigSession
+	// sessions is every miner bound on each rig port. A port is one virtual
+	// rig however many machines sit behind it; the slice is only so the
+	// dashboard can say how many.
+	sessions [][]*rigSession
 
 	// waitingSince and everSeen are what let a missing miner be reported as
 	// "not here YET" rather than "not here".
@@ -107,7 +110,7 @@ func newCoordinator(cfg config) *coordinator {
 	co := &coordinator{
 		cfg:       cfg,
 		startedAt: time.Now(),
-		sessions:  make([]*rigSession, len(cfg.Rigs)),
+		sessions:  make([][]*rigSession, len(cfg.Rigs)),
 		// The clock starts at construction: a fresh boot and a config reload
 		// are the same event to a miner, which finds its connection gone and
 		// backs off before trying again.
@@ -294,8 +297,7 @@ func (co *coordinator) rotate(reason string) {
 	co.rotations++
 	co.lastRotate = time.Now()
 	step := co.step
-	victims := make([]*rigSession, len(co.sessions))
-	copy(victims, co.sessions)
+	victims := co.allSessionsLocked()
 	// Mark the SESSIONS we are about to drop, so the gap each one leaves
 	// behind can be attributed when it unwinds.
 	//
@@ -309,10 +311,8 @@ func (co *coordinator) rotate(reason string) {
 	//
 	// Written under co.mu and read under co.mu in clearSession, which is what
 	// makes the handoff race-free.
-	for _, s := range co.sessions {
-		if s != nil {
-			s.rotated = true
-		}
+	for _, s := range victims {
+		s.rotated = true
 	}
 	table := co.assignmentTableLocked(prevStep, true)
 	co.mu.Unlock()
@@ -323,9 +323,7 @@ func (co *coordinator) rotate(reason string) {
 	// into clearSession as it unwinds, and holding the lock here would make
 	// it wait on us for no reason.
 	for _, s := range victims {
-		if s != nil {
-			s.close()
-		}
+		s.close()
 	}
 }
 
@@ -340,13 +338,10 @@ func (co *coordinator) rotate(reason string) {
 // reconfigured.
 func (co *coordinator) shutdown() {
 	co.mu.Lock()
-	victims := make([]*rigSession, len(co.sessions))
-	copy(victims, co.sessions)
+	victims := co.allSessionsLocked()
 	co.mu.Unlock()
 	for _, s := range victims {
-		if s != nil {
-			s.close()
-		}
+		s.close()
 	}
 }
 
@@ -430,9 +425,13 @@ func (co *coordinator) setSession(rigIdx int, s *rigSession) {
 	co.mu.Lock()
 	// Before the clock is cleared below: the gap between the close and now is
 	// what the rotation cost.
-	co.recordRotationGapLocked(rigIdx)
-	co.sessions[rigIdx] = s
-	co.waitingSince[rigIdx] = time.Time{}
+	// Only the first miner back ends the wait; a second one joining a live
+	// port is not a reconnect.
+	if len(co.sessions[rigIdx]) == 0 {
+		co.recordRotationGapLocked(rigIdx)
+		co.waitingSince[rigIdx] = time.Time{}
+	}
+	co.sessions[rigIdx] = append(co.sessions[rigIdx], s)
 	co.everSeen[rigIdx] = true
 	co.mu.Unlock()
 }
@@ -459,24 +458,57 @@ func (co *coordinator) recordRotationGapLocked(rigIdx int) {
 	}
 }
 
-func (co *coordinator) clearSession(rigIdx int, s *rigSession) {
-	co.mu.Lock()
-	if co.sessions[rigIdx] == s {
-		co.sessions[rigIdx] = nil
-		// One stamp: when the wait began, and what began it. Recording the
-		// cause anywhere other than the moment of the disconnect means
-		// recording it about a different moment.
-		co.waitingSince[rigIdx] = time.Now()
-		co.rotating[rigIdx] = s.rotated
+// otherMiners counts the sessions on a port besides s that are still alive.
+// A session already closing has not yet unwound to clearSession, and must
+// not count as company.
+// allSessionsLocked flattens every port's miners into one list. Caller
+// holds co.mu.
+func (co *coordinator) allSessionsLocked() []*rigSession {
+	var out []*rigSession
+	for _, ss := range co.sessions {
+		out = append(out, ss...)
 	}
-	co.mu.Unlock()
+	return out
 }
 
-func (co *coordinator) session(rigIdx int) (*rigSession, bool) {
+func (co *coordinator) otherMiners(rigIdx int, s *rigSession) int {
 	co.mu.Lock()
 	defer co.mu.Unlock()
-	s := co.sessions[rigIdx]
-	return s, s != nil
+	n := 0
+	for _, x := range co.sessions[rigIdx] {
+		// done is nil only on a bare literal; every accepted session has
+		// one. Guarded so a test can register placeholders without a socket.
+		if x == s || x.done == nil {
+			continue
+		}
+		select {
+		case <-x.done:
+		default:
+			n++
+		}
+	}
+	return n
+}
+
+func (co *coordinator) clearSession(rigIdx int, s *rigSession) {
+	co.mu.Lock()
+	ss := co.sessions[rigIdx]
+	for i, x := range ss {
+		if x != s {
+			continue
+		}
+		ss = append(ss[:i], ss[i+1:]...)
+		co.sessions[rigIdx] = ss
+		if len(ss) == 0 {
+			// One stamp: when the wait began, and what began it. Recording
+			// the cause anywhere other than the moment of the disconnect
+			// means recording it about a different moment.
+			co.waitingSince[rigIdx] = time.Now()
+			co.rotating[rigIdx] = s.rotated
+		}
+		break
+	}
+	co.mu.Unlock()
 }
 
 type gatewayStatus struct {
@@ -515,8 +547,12 @@ type rigStatus struct {
 	// and that is the point of publishing both: switchyard forwards your
 	// identity rather than inventing one, and this is where you check it
 	// without reading any code.
-	ClaimedUser  string `json:"claimedUser,omitempty"`
-	AuthorisedAs string `json:"authorisedAs,omitempty"`
+	ClaimedUser string `json:"claimedUser,omitempty"`
+	// Miners is every worker name currently bound on this port, in bind
+	// order. One entry is the ordinary case; the port is a virtual rig and
+	// this is what is behind it.
+	Miners       []string `json:"miners"`
+	AuthorisedAs string   `json:"authorisedAs,omitempty"`
 
 	Listen     string `json:"listen"`
 	ActivePool string `json:"activePool"`
@@ -725,8 +761,10 @@ func (co *coordinator) status() statusDoc {
 		RotationCostPct:       rotationCostPct,
 	}
 	active := make([]int, len(co.cfg.Rigs))
-	sessions := make([]*rigSession, len(co.sessions))
-	copy(sessions, co.sessions)
+	sessions := make([][]*rigSession, len(co.sessions))
+	for i, ss := range co.sessions {
+		sessions[i] = append([]*rigSession(nil), ss...)
+	}
 	// Copied under the same lock as the sessions they describe, so a rig
 	// cannot appear absent here and connected two lines later.
 	waitingSince := make([]time.Time, len(co.waitingSince))
@@ -771,10 +809,14 @@ func (co *coordinator) status() statusDoc {
 			Name:       co.rigLabel(i),
 			Listen:     rig.Listen,
 			ActivePool: poolName[active[i]],
-			Connected:  sessions[i] != nil,
+			Connected:  len(sessions[i]) > 0,
 			EverSeen:   everSeen[i],
+			Miners:     []string{},
 		}
-		if sessions[i] == nil && !waitingSince[i].IsZero() {
+		for _, s := range sessions[i] {
+			rs.Miners = append(rs.Miners, s.claimedUserSafe())
+		}
+		if len(sessions[i]) == 0 && !waitingSince[i].IsZero() {
 			rs.WaitingSeconds = int(time.Since(waitingSince[i]).Seconds())
 		}
 		if user, _, known, _ := co.creds[i].get(); known {
@@ -784,11 +826,12 @@ func (co *coordinator) status() statusDoc {
 		// already hold, so the index is exact -- and it cannot be knocked out
 		// of alignment by a pool being renamed underneath it.
 		boundIdx := -1
-		if sessions[i] != nil {
-			rs.ClaimedUser = sessions[i].claimedUserSafe()
-			if sessions[i].up != nil {
+		if len(sessions[i]) > 0 {
+			first := sessions[i][0]
+			rs.ClaimedUser = first.claimedUserSafe()
+			if first.up != nil {
 				for j := range co.ups[i] {
-					if co.ups[i][j] == sessions[i].up {
+					if co.ups[i][j] == first.up {
 						boundIdx = j
 						rs.BoundTo = poolName[j]
 						break

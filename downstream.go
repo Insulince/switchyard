@@ -267,9 +267,11 @@ func (s *rigSession) run() {
 				s.mu.Lock()
 				s.claimedUser = u
 				s.mu.Unlock()
-				// THIS is where a rig's identity enters switchyard, and it is
-				// the only place it does.
-				s.co.noteCredentials(s.rigIdx, u, pw)
+				// THIS is where a rig's identity enters switchyard, and the
+				// coordinator decides what it means: a first miner, a fleet
+				// member back from a rotation, a lone miner renaming itself,
+				// or a stranger joining a port that already has a name.
+				s.co.noteAuthorise(s.rigIdx, s, u, pw)
 				if introducing {
 					// The introduction is over. Answer the authorize so the
 					// miner does not sit waiting, then close: its reconnect
@@ -362,8 +364,10 @@ func serveRig(ctx context.Context, co *coordinator, rigIdx int) error {
 		// loop started. Eviction happens in attach(), which only real
 		// subscribers reach.
 		//
-		// One miner per port: a genuine reconnect evicts the stale session
-		// when it subscribes, so the newest real miner still wins.
+		// Any number of miners per port: each gets its own slice of the
+		// gateway's extranonce at subscribe (see upstream.attach). Nothing
+		// is ever evicted; a dead socket is reaped by keepalive or the next
+		// rotation.
 		s := newRigSession(co, rig, rigIdx, conn)
 		go s.run()
 	}

@@ -38,6 +38,14 @@ type credState struct {
 	pass  string
 	known bool
 
+	// members is every worker name that has authorised on this port under
+	// the current identity: the roster of a virtual rig. After a rotation
+	// the miners race back and whoever arrives first is momentarily alone;
+	// without the roster a second name on an empty port is indistinguishable
+	// from a lone miner renaming itself, and re-authorising the gateways
+	// for it drops everyone. Cleared whenever the identity itself moves.
+	members map[string]bool
+
 	// changed is closed whenever the credentials move, and then replaced.
 	// Waiters take a snapshot of both the values and this channel under the
 	// lock, so there is no window in which an update is missed.
@@ -56,9 +64,10 @@ func (c *credState) get() (user, pass string, known bool, changed <-chan struct{
 	return c.user, c.pass, c.known, c.changed
 }
 
-// set records what a miner offered. Reports whether anything actually moved,
-// so an ordinary reconnect with the same identity does not churn six upstream
-// sessions for nothing.
+// set records what a miner offered and, if that is a new identity, starts a
+// fresh roster with it as the only member. Reports whether anything actually
+// moved, so an ordinary reconnect with the same identity does not churn six
+// upstream sessions for nothing.
 func (c *credState) set(user, pass string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -66,9 +75,28 @@ func (c *credState) set(user, pass string) bool {
 		return false
 	}
 	c.user, c.pass, c.known = user, pass, true
+	c.members = map[string]bool{user: true}
 	close(c.changed)
 	c.changed = make(chan struct{})
 	return true
+}
+
+// join records a worker name as a member of this port's virtual rig without
+// changing the identity presented upstream.
+func (c *credState) join(user string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.members != nil {
+		c.members[user] = true
+	}
+}
+
+// isMember reports whether a worker name has already been on this port under
+// the current identity.
+func (c *credState) isMember(user string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.members[user]
 }
 
 // waitKnown blocks until this rig has told us who it is, or the context ends.
@@ -108,6 +136,38 @@ func (co *coordinator) noteCredentials(rigIdx int, user, pass string) {
 	log.Printf("[%s] authorising upstream as %q", co.rigLabel(rigIdx), user)
 	for j := range co.ups[rigIdx] {
 		co.ups[rigIdx][j].dropForReauth()
+	}
+}
+
+// noteAuthorise is the one place a miner's mining.authorize turns into a
+// decision about the port's upstream identity.
+//
+// A port is one virtual rig with one upstream identity, set by whoever
+// arrives first; every name that joins after is recorded as a member. A
+// different name can therefore mean two things. A member of the roster is a
+// fleet miner coming back -- typically first through the door after a
+// rotation, when it is momentarily alone -- and must not touch the identity:
+// re-authorising the gateways for it drops everyone on the port for as long
+// as the miners' own retry backoff. A name never seen here, arriving on an
+// empty port, is a lone miner renaming itself, and is honoured exactly as it
+// was before ports could hold more than one miner.
+func (co *coordinator) noteAuthorise(rigIdx int, s *rigSession, user, pass string) {
+	if rigIdx < 0 || rigIdx >= len(co.creds) {
+		return
+	}
+	creds := co.creds[rigIdx]
+	cur, _, known, _ := creds.get()
+	switch {
+	case !known || cur == user:
+		co.noteCredentials(rigIdx, user, pass)
+	case creds.isMember(user):
+		// Back on the roster; the identity stands.
+	case co.otherMiners(rigIdx, s) == 0:
+		co.noteCredentials(rigIdx, user, pass)
+	default:
+		creds.join(user)
+		log.Printf("[%s] miner %q joins a port already identified upstream as %q; keeping that",
+			co.rigLabel(rigIdx), user, cur)
 	}
 }
 

@@ -137,17 +137,25 @@ func paramNumberAt(params json.RawMessage, n int) (float64, bool) {
 // connection. Rewriting keeps pool-side crediting anchored to one stable
 // identity per rig, no matter how the miner is configured.
 func replaceParam0(params json.RawMessage, v string) (json.RawMessage, error) {
+	return replaceParamAt(params, 0, v)
+}
+
+// replaceParamAt rewrites the nth string element of a params array. A params
+// array shorter than n is returned untouched: the gateway will reject the
+// malformed submit itself, and inventing elements to satisfy it would be
+// forwarding a share the miner did not send.
+func replaceParamAt(params json.RawMessage, n int, v string) (json.RawMessage, error) {
 	var arr []json.RawMessage
 	if err := json.Unmarshal(params, &arr); err != nil {
 		return nil, err
 	}
-	if len(arr) == 0 {
+	if len(arr) <= n {
 		return params, nil
 	}
 	q, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
 	}
-	arr[0] = q
+	arr[n] = q
 	return json.Marshal(arr)
 }

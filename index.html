@@ -1305,7 +1305,15 @@ markOf(n.now, "<p><b>Right now.</b> Measured from accepted-share difficulty over
     // an invisible substitution is indistinguishable from a hostile one, so
     // both names are published and a mismatch is called out rather than buried.
     var sent = (r.gateways && r.gateways.length) ? r.gateways[0].authorisedAs : r.name;
-    if (!r.claimedUser) {
+    var miners = r.miners || [];
+    if (miners.length > 1) {
+      // A port with several machines behind it is one virtual rig, and the
+      // line that would name a single miner names the group instead. The
+      // one-miner case below is untouched: it is the ordinary one.
+      setMeta(n.who, [
+        { tag: "span", cls: "ok", text: "\u2713" }, " " + miners.length + " miners as " + sent
+      ]);
+    } else if (!r.claimedUser) {
       setMeta(n.who, [{ tag: "span", cls: "sentinel", text: "sends " + sent + " upstream" }]);
     } else if (r.claimedUser === sent) {
       setMeta(n.who, [{ tag: "span", cls: "ok", text: "✓" }, " authorised as " + sent]);
@@ -1315,7 +1323,16 @@ markOf(n.now, "<p><b>Right now.</b> Measured from accepted-share difficulty over
         { tag: "span", cls: "sentinel", text: r.claimedUser }, " → " + sent
       ]);
     }
-markOf(n.who, "<p><b>Who this rig is upstream.</b> The miner asked to authorise as "
+markOf(n.who, (miners.length > 1
+        ? "<p><b>" + miners.length + " miners share this port.</b> Each gets its "
+          + "own slice of the gateway's extranonce, so they never duplicate "
+          + "work, and together they are one rig to every pool: one session, "
+          + "one difficulty, one share of the rotation.</p>"
+          + "<p>" + miners.map(function (m) {
+              return "<span class=\"k\">" + (m || "(unnamed)") + "</span>";
+            }).join(" \u00b7 ") + "</p>"
+        : "")
+      + "<p><b>Who this rig is upstream.</b> The miner asked to authorise as "
       + (r.claimedUser ? "<span class=\"k\">" + r.claimedUser + "</span>"
                        : "<i>nothing yet</i>")
       + "; switchyard sent <span class=\"k\">" + sent + "</span> to the gateway.</p>"
