@@ -401,7 +401,7 @@ typo fails loudly instead of being ignored.
 | `minDwellSeconds` | `60` | Floor on a rotation slot, so fast blocks don't spend more time reconnecting than hashing. |
 | `maxDwellSeconds` | `900` | Ceiling, so a slow block doesn't strand a pool. |
 | `pollSeconds` | `2` | Dashboard refresh. |
-| `gatewayPollSeconds` | `30` | How often gateway status pages are read. |
+| `gatewayPollSeconds` | `30` | How often gateway status pages are read. While a dashboard has the **shares** flow mode open, they are also read four times a second, for as long as it stays open. |
 | `dialTimeoutSeconds` | `10` | Upstream connect timeout. |
 | `versionRollingMask` | `""` (off) | Leave empty unless **every** rig uses version rolling — see below. |
 
@@ -560,6 +560,11 @@ own gateway and their own pool.
   can reach the port can rewrite `config.json`. On an untrusted network, set
   `127.0.0.1:7160` and use an SSH tunnel, or put it behind an authenticating
   proxy.
+- **Anyone who can reach the dashboard can make switchyard read your gateways
+  four times a second**, by holding the shares stream (`/shares/stream`) open —
+  the same small status-page read it always does, just often. That stream also
+  reveals when each rig's shares are accepted. Neither is more than the page
+  already shows, but both last as long as the connection does.
 - **Config is the only way in.** No path changes the running system without
   going through `config.json`. The UI is a convenience, never a requirement.
 - **Builds are reproducible from this repo**, and the running version is in the

@@ -32,7 +32,7 @@ func TestRetainedLinesSurviveFurtherReads(t *testing.T) {
 		noise = `{"error":[23,"high-hash",null],"id":179681,"result":null}                                             `
 	)
 
-	u := newUpstream(newCoordinator(testConfig()), 0, testConfig().Rigs[0], testConfig().Pools[0])
+	u := newUpstream(newCoordinator(testConfig()), 0, 0, testConfig().Rigs[0], testConfig().Pools[0])
 
 	// OneByteReader is what makes this a real reproduction. Handed the whole
 	// input at once, Scanner reads all three lines into distinct regions of
@@ -73,7 +73,7 @@ func TestRetainedLinesSurviveFurtherReads(t *testing.T) {
 // Storing it would be worse than dropping it: the rig silently falls back to 1
 // and floods, where dropping leaves the last known-good value in place.
 func TestUnparseableDifficultyIsRejected(t *testing.T) {
-	u := newUpstream(newCoordinator(testConfig()), 0, testConfig().Rigs[0], testConfig().Pools[0])
+	u := newUpstream(newCoordinator(testConfig()), 0, 0, testConfig().Rigs[0], testConfig().Pools[0])
 
 	good := []byte(`{"id":null,"method":"mining.set_difficulty","params":[1024]}`)
 	var m message
@@ -106,7 +106,7 @@ func TestUnparseableDifficultyIsRejected(t *testing.T) {
 // whole units for accounting. Rejecting them left rigs at difficulty 1 and a
 // 96% high-hash reject rate on three live gateways.
 func TestFractionalDifficultyIsForwardedExactly(t *testing.T) {
-	u := newUpstream(newCoordinator(testConfig()), 0, testConfig().Rigs[0], testConfig().Pools[0])
+	u := newUpstream(newCoordinator(testConfig()), 0, 0, testConfig().Rigs[0], testConfig().Pools[0])
 	for _, tc := range []struct {
 		wire  string
 		want  uint64

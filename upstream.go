@@ -49,10 +49,11 @@ type pendingSubmit struct {
 // gateway's per-rig difficulty merely sags toward the pool-supplied floor
 // while idle (bounded by override_vardiff_min) and recovers when work returns.
 type upstream struct {
-	pool   poolConfig
-	rig    rigConfig
-	rigIdx int
-	co     *coordinator
+	pool    poolConfig
+	rig     rigConfig
+	rigIdx  int
+	poolIdx int
+	co      *coordinator
 
 	// user and pass are whatever the MINER authorised with, learned when it
 	// first connects and then presented upstream unchanged. Empty until then,
@@ -143,11 +144,12 @@ type upstream struct {
 	boundAt time.Time
 }
 
-func newUpstream(co *coordinator, rigIdx int, rig rigConfig, pool poolConfig) *upstream {
+func newUpstream(co *coordinator, rigIdx, poolIdx int, rig rigConfig, pool poolConfig) *upstream {
 	return &upstream{
 		pool:     pool,
 		rig:      rig,
 		rigIdx:   rigIdx,
+		poolIdx:  poolIdx,
 		co:       co,
 		pending:  map[uint64]pendingSubmit{},
 		sessions: map[*rigSession]int{},
@@ -527,12 +529,14 @@ func (u *upstream) routeResponse(m *message) {
 	u.mu.Lock()
 	p, ok := u.pending[id]
 	delete(u.pending, id)
+	accepted := false
 	if ok {
 		// A share is accepted only on a literal true. Anything else -- false,
 		// null, an error object -- is a rejection, and lumping them together
 		// is right here: the status view answers "is this rig working", and
 		// every non-true answer means it is not.
 		if string(m.Result) == "true" {
+			accepted = true
 			u.accepted++
 			u.acceptedWork += u.diff
 			u.addRecentLocked(time.Now(), u.diff)
@@ -542,6 +546,12 @@ func (u *upstream) routeResponse(m *message) {
 		u.lastShare = time.Now()
 	}
 	u.mu.Unlock()
+	// Outside the lock, and a single atomic load when no dashboard is
+	// watching: this is the path every accepted share takes back to the
+	// miner, and an animation must not be able to slow it.
+	if accepted && u.co != nil {
+		u.co.feed.publish(shareEvent{Kind: "gw", Rig: u.rigIdx, Pool: u.poolIdx, N: 1})
+	}
 	if !ok {
 		return
 	}

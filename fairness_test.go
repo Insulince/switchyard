@@ -144,7 +144,7 @@ func TestDwellCeilingMustExceedFloor(t *testing.T) {
 // size so the band moves smoothly instead of stepping at each rotation.
 func TestDwellChunksAreSealedWhole(t *testing.T) {
 	cfg := testConfig()
-	u := newUpstream(newCoordinator(cfg), 0, cfg.Rigs[0], cfg.Pools[0])
+	u := newUpstream(newCoordinator(cfg), 0, 0, cfg.Rigs[0], cfg.Pools[0])
 
 	if got := u.statsAt(time.Now()).chunkSq; got != 0 {
 		t.Fatalf("fresh upstream: chunkSq = %v, want 0", got)

@@ -44,10 +44,15 @@ type server struct {
 
 	srv  *http.Server
 	addr string
+
+	// feed is the share event stream behind /shares/stream. Here rather than
+	// on the coordinator for the same reason the server is: it outlives a
+	// reload, and so does a dashboard's subscription to it.
+	feed *shareFeed
 }
 
 func newServer(path string) *server {
-	return &server{path: path, reloadC: make(chan struct{}, 1)}
+	return &server{path: path, reloadC: make(chan struct{}, 1), feed: newShareFeed()}
 }
 
 // swap installs a newly built coordinator. Called once at boot and once per
@@ -137,6 +142,47 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = enc.Encode(v)
 }
 
+// shareBeat is how often an idle share stream sends a comment line. It keeps
+// an intermediary from timing the connection out, and it is how a stream to a
+// browser that vanished without closing gets noticed: the write fails.
+const shareBeat = 15 * time.Second
+
+// serveShareStream pushes share events to one dashboard as server-sent
+// events, for as long as it stays connected. See shareFeed.
+func (s *server) serveShareStream(w http.ResponseWriter, r *http.Request) {
+	rc := http.NewResponseController(w)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	// A reverse proxy in front of the dashboard would otherwise buffer the
+	// stream and deliver it in lumps, which is the one thing it exists not to do.
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	events, unsubscribe := s.feed.subscribe()
+	defer unsubscribe()
+
+	if _, err := io.WriteString(w, ": open\n\n"); err != nil || rc.Flush() != nil {
+		return
+	}
+	beat := time.NewTicker(shareBeat)
+	defer beat.Stop()
+	for {
+		var err error
+		select {
+		case <-r.Context().Done():
+			return
+		case <-beat.C:
+			_, err = io.WriteString(w, ": beat\n\n")
+		case ev := <-events:
+			b, _ := json.Marshal(ev)
+			_, err = fmt.Fprintf(w, "data: %s\n\n", b)
+		}
+		if err != nil || rc.Flush() != nil {
+			return
+		}
+	}
+}
+
 // mustPost rejects anything that is not a POST.
 //
 // Every endpoint that changes something is POST-only, so nothing here is
@@ -175,6 +221,8 @@ func (s *server) routes() http.Handler {
 		s.mu.RUnlock()
 		writeJSON(w, http.StatusOK, doc)
 	})
+
+	mux.HandleFunc("/shares/stream", s.serveShareStream)
 
 	// Rotate now, on request.
 	//

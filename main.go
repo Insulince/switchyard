@@ -57,6 +57,7 @@ func main() {
 
 		genCtx, cancel := context.WithCancel(ctx)
 		co := newCoordinator(cfg)
+		co.feed = srv.feed
 		srv.swap(co, cfg)
 
 		if !cfg.configured() {
@@ -76,6 +77,7 @@ func main() {
 			co.start(genCtx)
 			go co.watchDwellCeiling(genCtx)
 			go co.watchGateways(genCtx)
+			go co.watchPoolShares(genCtx)
 
 			for i := range cfg.Rigs {
 				go func(idx int) {

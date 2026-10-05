@@ -22,6 +22,11 @@
   --good:      #4fc3a1;
   --bad:       #e85d5d;
   --gold:      #f2c14e;
+  /* A link carrying far more than its fair share. Warmer and deeper than
+     --gold on purpose: gold is the ROTATION colour (the spark, the arrival
+     flash), and a line that is merely busy must not read as one that just
+     changed hands. */
+  --hot:       #f6a93b;
   --heartbeat: #3a4552;
   /* Reserved, as in blockwatch, for reference marks only: the ideal tick and
      the tolerance band drawn around it. Never a bar, never a status. */
@@ -204,6 +209,8 @@ header button[title], .tip[title] { cursor: pointer; }
   text-transform: uppercase; letter-spacing: 0.09em; color: var(--dim);
 }
 .group > .note { margin: 0 0 0.7rem; font-size: 0.72rem; color: var(--sentinel); line-height: 1.5; }
+.localrow { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.localrow .hintline { font-size: 0.66rem; color: var(--sentinel); line-height: 1.4; }
 .card {
   border: 1px solid var(--border); border-radius: 8px; background: var(--fill);
   padding: 0.7rem 0.8rem; margin-bottom: 0.6rem;
@@ -546,14 +553,26 @@ header .help { margin-left: 0.35rem; }
 .link { fill: none; stroke-width: 1.7; transition: stroke .6s, opacity .6s, stroke-width .6s; }
 .link.idle   { stroke: var(--heartbeat); stroke-dasharray: 4 6; opacity: .9; }
 .link.active { stroke: var(--good); stroke-width: 2.2; }
+/* Heat (0-1, set per link by refreshFlow) mixes the line and its dots from
+   green toward --hot. At 0 this is exactly the plain green above -- the
+   fallback declarations are what a browser without color-mix() keeps. */
+.link.active {
+  stroke: color-mix(in oklab, var(--good), var(--hot) calc(var(--heat, 0) * 100%));
+  stroke-width: calc(2.2px + var(--heat, 0) * 0.6px);
+}
+.halo {
+  fill: none; stroke: var(--hot); stroke-width: 8; stroke-linecap: round;
+  opacity: calc(var(--heat, 0) * .22); transition: opacity .6s;
+}
 /* A dot travelling the line is the ambient signal that work is moving. It
    replaces the old dash drift, which cannot exist on a solid stroke. */
 /* The circle is drawn at the origin and placed entirely by offset-distance,
    so it needs no cx/cy of its own. */
 @keyframes travel { from { offset-distance: 0%; } to { offset-distance: 100%; } }
 .pulse { fill: var(--good); opacity: .85; }
+.pulse { fill: color-mix(in oklab, var(--good), var(--hot) calc(var(--heat, 0) * 100%)); transition: fill .6s; }
 /* Dimmer on the leg switchyard does not own, matching the line it travels. */
-.pulse.beyond { fill: var(--good); opacity: .45; }
+.pulse.beyond { opacity: .45; }
 .spark { fill: none; stroke: var(--gold); stroke-width: 3.4; stroke-linecap: round; }
 .linklabel { font-size: 10.5px; font-family: ui-monospace, Consolas, monospace; fill: var(--sentinel); }
 .linklabel.on { fill: var(--good); }
@@ -814,6 +833,7 @@ p.foot { font-size: 0.7rem; color: var(--sentinel); margin: 0.5rem 0 0; }
   <button id="configBtn" class="call">configure&hellip;</button><button class="help" type="button" data-help="configure" aria-label="What is this?">?</button>
   <button id="rotateBtn" class="act">rotate now</button><button class="help" type="button" data-help="rotate" aria-label="What is this?">?</button>
   <button id="motionBtn">motion: auto</button><button class="help" type="button" data-help="motion" aria-label="What is this?">?</button>
+  <button id="flowBtn">flow: scaled</button><button class="help" type="button" data-help="flowMode" aria-label="What is this?">?</button>
   <button id="resetBtn" class="danger">reset stats</button><button class="help" type="button" data-help="reset" aria-label="What is this?">?</button>
 </header>
 
@@ -849,7 +869,7 @@ p.foot { font-size: 0.7rem; color: var(--sentinel); margin: 0.5rem 0 0; }
 
   <section>
     <details class="sec" open>
-      <summary><p class="label"><span class="caret">&#9656;</span>Flow<button class="help" type="button" data-help="flow" aria-label="What is this?">?</button><span class="hint">rigs &rarr; switchyard &rarr; DATUM gateways &rarr; pools</span></p></summary>
+      <summary><p class="label"><span class="caret">&#9656;</span>Flow<button class="help" type="button" data-help="flow" aria-label="What is this?">?</button><span class="hint">rigs &rarr; switchyard &rarr; DATUM gateways &rarr; pools</span><span class="hint attn" id="flowCost"></span></p></summary>
     <div id="flowCard">
       <div id="flow">
         <svg id="links"></svg>
@@ -1645,7 +1665,7 @@ function refreshLinkLabels(d) {
 }
 
 function linkSig(d, host) {
-  var parts = [Math.round(host.width), Math.round(host.height), motionOn() ? 1 : 0];
+  var parts = [Math.round(host.width), Math.round(host.height), motionOn() ? 1 : 0, flowMode, heatOn ? 1 : 0];
   d.rigs.forEach(function (r) { parts.push(r.name, r.connected ? 1 : 0, r.boundTo || ""); });
   d.pools.forEach(function (p) { parts.push(p.name, p.occupants.length > 0 ? 1 : 0); });
   return parts.join("|");
@@ -1666,10 +1686,476 @@ var linkLabels = [];
 // offset-path is the modern equivalent: the animation is declarative, the
 // engine can hand it to the compositor, and mutating a sibling text node does
 // not touch it.
-function travelAlong(el, dstr) {
+//
+// phase (0-1) starts the dot that far along its path, by a negative delay, so
+// several dots on one link are spread out from the first frame instead of
+// fanning out from the start of the line.
+var TRAVEL_SECS = 5.6;
+// Dot sizes, shared by every flow mode. Half as big again as they started:
+// a moving dot a few pixels across was easy to lose against the line it rides.
+// Smaller on the gateway -> pool leg, matching that leg's muted line.
+var DOT_R = 4.8, DOT_R_BEYOND = 3.9;
+function travelAlong(el, dstr, phase) {
   el.style.offsetPath = "path('" + dstr + "')";
   el.style.offsetRotate = "0deg";
-  el.style.animation = "travel 5.6s linear infinite";
+  el.style.animation = "travel " + TRAVEL_SECS + "s linear infinite";
+  if (phase) el.style.animationDelay = (-phase * TRAVEL_SECS) + "s";
+}
+
+// ---- hashrate-scaled flow ----------------------------------------------------
+//
+// In "scaled" mode each carrying link shows how much of the fleet's work it
+// carries, three ways: more dots, faster dots, and -- once it carries clearly
+// more than its fair share -- a line that runs hot, from green toward gold. In
+// "even" mode every link gets one dot at the base speed and today's green,
+// which is what the diagram always did.
+//
+// All three follow the live numbers on every poll, without rebuilding the
+// diagram: speed by Animation.updatePlaybackRate() (position stays continuous,
+// so the dots on a link keep their spacing), dot count by adding or removing
+// single circles, heat by a CSS custom property the stroke and fill mix on.
+// Every write is skipped when the value has not meaningfully changed.
+var FLOW_KEY = "switchyard.flow";
+var flowMode = "scaled";
+// Heat can be switched off on its own, for anyone who would rather the lines
+// stayed green: dot count and speed still scale. Set from the configure
+// window's "This browser" section; on unless someone has turned it off.
+var HEAT_KEY = "switchyard.heat";
+var heatOn = true;
+try { heatOn = localStorage.getItem(HEAT_KEY) !== "off"; } catch (e) { /* private browsing */ }
+// One entry per carrying link: see flowGroup.
+var flowGroups = [];
+
+// ---- the rate the flow is drawn from
+//
+// NOT the server's "now" hashrate. That is measured over the CURRENT binding
+// (upstream.recentThsLocked), so every rotation restarts it, and for its first
+// minute it divides by a full minute however briefly the rig has been bound,
+// so it reads low on purpose. With a short dwell a rig spends much of its time
+// inside that first minute. Fed straight in, every rotation dropped each rig to
+// one slow, cold dot.
+//
+// Instead each rig's rate is measured here, from the cumulative work counters
+// the status already carries: work done over the last two minutes, across
+// however many rotations fell inside them. A rotation does not touch the
+// counters, so it does not touch the rate. Two minutes is long enough that a
+// single share arriving moves a big rig's number by a few percent rather than
+// lurching the dots, and short enough to follow real changes in hardware.
+//
+// A rig first seen has no window yet. Until it has, its rate is blended from a
+// seed -- the better of the server's two figures -- toward the measured one,
+// in proportion to how much of the window has filled, so the handover is a
+// slope rather than a jump and an early, lumpy measurement carries little
+// weight.
+var rigRates = {};
+var RATE_WINDOW_MS = 120000;
+
+function smoothRigRates(d) {
+  var now = Date.now(), out = {};
+  d.rigs.forEach(function (r) {
+    if (!r.connected) {
+      delete rigRates[r.name];
+      out[r.name] = 0;
+      return;
+    }
+    var work = 0;
+    r.gateways.forEach(function (g) { work += g.work || 0; });
+    var m = rigRates[r.name];
+    // Counters going backwards means the stats were reset: start over.
+    if (!m || work < m.samples[m.samples.length - 1].work) {
+      m = rigRates[r.name] = { samples: [], seed: Math.max(r.nowThs || 0, r.ths || 0) };
+    }
+    var last = m.samples[m.samples.length - 1];
+    // At most one sample a second: this runs twice on a poll that redraws.
+    if (!last || now - last.t >= 1000) m.samples.push({ t: now, work: work });
+    // Keep exactly one sample at or beyond the window's edge, as its baseline.
+    while (m.samples.length > 2 && now - m.samples[1].t >= RATE_WINDOW_MS) m.samples.shift();
+    var first = m.samples[0], span = now - first.t;
+    var measured = span > 0 ? (work - first.work) * 4294967296 / (span / 1000) / 1e12 : 0;
+    var w = Math.min(1, span / RATE_WINDOW_MS);
+    out[r.name] = m.seed * (1 - w) + measured * w;
+  });
+  return out;
+}
+
+// flowShares maps each link key to { share, fair }: its fraction of the
+// fleet's (smoothed) hashrate, and the fraction an even split would give it.
+// A rig's rate is what flows on its port link and on the gateway link it is
+// bound to; a gateway's last leg carries the sum of the rigs bound there.
+function flowShares(d) {
+  var rates = smoothRigRates(d), total = 0, rigs = 0, m = {}, pool = {};
+  d.rigs.forEach(function (r) {
+    if (r.connected) { total += rates[r.name]; rigs++; }
+  });
+  function share(v) { return total > 0 ? Math.min(1, Math.max(0, v / total)) : 0; }
+  var rigFair = rigs > 1 ? 1 / rigs : 1;
+  // Over the pools that CAN be occupied: one rig across three pools is not
+  // one pool hogging the work, it is the only work there is.
+  var slots = Math.min(d.pools.length, rigs);
+  var poolFair = slots > 1 ? 1 / slots : 1;
+  d.rigs.forEach(function (r) {
+    var v = { share: r.connected ? share(rates[r.name]) : 0, fair: rigFair };
+    m["rig:" + r.name] = v;
+    if (r.boundTo) {
+      m["gw:" + r.name + ":" + r.boundTo] = v;
+      pool[r.boundTo] = (pool[r.boundTo] || 0) + rates[r.name];
+    }
+  });
+  d.pools.forEach(function (p) {
+    m["pool:" + p.name] = { share: share(pool[p.name] || 0), fair: poolFair };
+  });
+  return m;
+}
+
+var NO_FLOW = { share: 0, fair: 1 };
+
+// flowCount is how many dots a link should have, given how many it has now.
+//
+// The dead zone is what stops a link flickering between two counts: the
+// count only moves once the share is a quarter of a step past the boundary.
+// Without it a rig sitting near a boundary would gain and lose a dot all day.
+function flowCount(share, have) {
+  // Shares mode has no standing dots: every dot there is one share's trip.
+  if (!motionOn() || flowMode === "shares") return 0;
+  if (flowMode !== "scaled") return 1;
+  var want = 1 + 3 * share;
+  if (have > 0 && Math.abs(want - have) < 0.75) return have;
+  return Math.max(1, Math.min(4, Math.round(want)));
+}
+
+// flowRate converts a share into a playback rate against the base duration.
+// The square root lifts the low end: a rig with 2% of the fleet still visibly
+// moves (about 8 s a crossing) instead of crawling, while the whole fleet on
+// one link crosses in about 2.5 s.
+function flowRate(share) {
+  if (flowMode !== "scaled") return 1;
+  return TRAVEL_SECS / (9 - 6.5 * Math.sqrt(share));
+}
+
+// flowHeat is 0 for a link carrying its fair share or less, rising to 1 as it
+// approaches carrying everything.
+//
+// Measured against the fair share, not against the other links, on purpose:
+// the baseline is the plain green line, and a small rig must not read as dim
+// or failing merely for being small. Heat only says "this link is doing far
+// more than an even split would give it". It is quantised to twentieths so a
+// share drifting by a hair does not rewrite styles on every poll.
+function flowHeat(v) {
+  if (flowMode === "even" || !heatOn || v.fair >= 1) return 0;
+  var x = (v.share - v.fair) / (1 - v.fair);
+  x = Math.min(1, Math.max(0, (x - 0.15) / 0.7));
+  return Math.round(x * x * (3 - 2 * x) * 20) / 20;
+}
+
+function travelAnim(el) {
+  if (el._travel) return el._travel;
+  var as = el.getAnimations ? el.getAnimations() : [];
+  for (var i = 0; i < as.length; i++) {
+    if (as[i].animationName === "travel") return (el._travel = as[i]);
+  }
+  return null;
+}
+
+function setDotRate(el, rate) {
+  var a = travelAnim(el);
+  if (!a) return;
+  if (a.updatePlaybackRate) a.updatePlaybackRate(rate);
+  else a.playbackRate = rate;
+}
+
+// dotProgress is how far along its line a dot is right now (0-1), or null.
+function dotProgress(el) {
+  var a = travelAnim(el);
+  var p = a && a.effect ? a.effect.getComputedTiming().progress : null;
+  return p == null ? null : p;
+}
+
+// widestGap returns the midpoint of the largest gap between the given
+// positions on a looping line, or 0 for an empty one.
+//
+// This is where a live dot goes. Starting new dots at the beginning of the
+// line put every dot added in one poll at the same place, at the same speed,
+// so three added dots travelled as one for ever -- and filling the widest gap
+// keeps the spacing as near even as a redraw would make it.
+function widestGap(at) {
+  if (!at.length) return 0;
+  var s = at.slice().sort(function (a, b) { return a - b; });
+  var best = s[0] + 1 - s[s.length - 1], mid = (s[s.length - 1] + best / 2) % 1;
+  for (var i = 1; i < s.length; i++) {
+    if (s[i] - s[i - 1] > best) {
+      best = s[i] - s[i - 1];
+      mid = s[i - 1] + best / 2;
+    }
+  }
+  return mid;
+}
+
+// addDot puts one dot on a link, directly above the link's last dot so it
+// stacks with the line it travels. A live addition fades in where it lands
+// rather than popping into existence mid-line.
+function addDot(g, phase, live) {
+  var c = svgEl("circle", { r: g.r, "class": g.cls });
+  travelAlong(c, g.dstr, phase);
+  if (g.heat) c.style.setProperty("--heat", g.heat);
+  var after = g.els.length ? g.els[g.els.length - 1] : g.path;
+  g.layer.insertBefore(c, after.nextSibling);
+  g.els.push(c);
+  if (live) {
+    c.animate({ opacity: [0, 0.85] }, { duration: 700, easing: "ease-out" });
+    setDotRate(c, g.rate);
+  }
+}
+
+// dropDot fades one dot out and then disposes of it. Its animations are
+// cancelled before the node goes, not after: a detached node's animation
+// keeps running until collection, and a tab open all day would collect a lot.
+function dropDot(g) {
+  var c = g.els.pop();
+  var gone = false;
+  function done() {
+    if (gone) return;
+    gone = true;
+    c.getAnimations().forEach(function (a) { a.cancel(); });
+    if (c.parentNode) c.parentNode.removeChild(c);
+  }
+  var f = c.animate({ opacity: 0 }, { duration: 700, fill: "forwards" });
+  f.onfinish = done;
+  // Background tabs throttle animations; see fireSpark.
+  setTimeout(done, 1000);
+}
+
+// flowGroup registers one carrying link and draws its starting dots, evenly
+// spaced. It returns the dots so the caller can stack them with their line.
+function flowGroup(layer, path, halo, dstr, key, v, r, cls) {
+  v = v || NO_FLOW;
+  var g = {
+    key: key, layer: layer, path: path, halo: halo, dstr: dstr,
+    r: r, cls: cls, els: [], rate: 1, heat: flowHeat(v)
+  };
+  if (g.heat) {
+    path.style.setProperty("--heat", g.heat);
+    if (halo) halo.style.setProperty("--heat", g.heat);
+  }
+  var n = flowCount(v.share, 0);
+  for (var i = 0; i < n; i++) addDot(g, i / n, false);
+  flowGroups.push(g);
+  return g.els.slice();
+}
+
+// ---- shares mode ---------------------------------------------------------------
+//
+// Experimental. One dot per real share, sent the moment it happens: the server
+// pushes each one down /shares/stream (see sharefeed.go), and this draws it on
+// arrival rather than guessing it into a slot between two polls.
+//
+// - rig -> switchyard -> gateway: a share the GATEWAY accepted from that rig,
+//   pushed from the very response that accepted it. Exact.
+// - gateway -> pool: shares the POOL accepted from that gateway. DATUM shows
+//   those only on its status page, so while this stream is open the server
+//   reads each page four times a second, and a dot lands within about a
+//   quarter second of the counter moving. The count is gateway-wide: it cannot
+//   be split by rig, and it includes anything else mining through the gateway.
+//
+// The two legs count different things at different difficulties, so their
+// rates are not meant to match.
+var SHARE_LEG_MS = 1400;
+// How long a pool acceptance waits for the rig's dot to reach its gateway
+// before being drawn on its own. The rig's dot arrives two legs after the
+// share was accepted; the pool's word follows the accept by a fraction of a
+// second -- so this is the dot's travel time plus a margin.
+var SHARE_CREDIT_MS = 2 * SHARE_LEG_MS + 1000;
+// The interval the server reads gateway pages at while streaming. Several
+// pool shares in one read are spread across it rather than drawn stacked.
+var SHARE_POOL_READ_MS = 250;
+// A gateway that restarts mid-read could in principle report a large jump;
+// past this many in one event it stops being a picture of shares.
+var SHARE_BATCH_MAX = 16;
+var shareStream = null;
+// Pool acceptances not yet carried on by a rig's dot, per pool name.
+var shareCredits = {};
+
+// syncShareStream holds the stream open exactly while shares mode is on
+// screen. Closed while the tab is hidden too: the server reads every gateway
+// four times a second for as long as anyone is connected, and a tab nobody is
+// looking at should not keep that running. Cheap enough to call every poll,
+// which is what keeps it right after a mode, motion or visibility change.
+function syncShareStream() {
+  var want = flowMode === "shares" && motionOn() && !document.hidden
+    && typeof EventSource !== "undefined";
+  if (want && !shareStream) {
+    // EventSource reconnects by itself if the stream drops -- including
+    // across a status-listener restart -- so nothing here retries.
+    shareStream = new EventSource("shares/stream");
+    shareStream.onmessage = function (e) {
+      var ev;
+      try { ev = JSON.parse(e.data); } catch (x) { return; }
+      onShare(ev);
+    };
+  } else if (!want && shareStream) {
+    shareStream.close();
+    shareStream = null;
+  }
+}
+document.addEventListener("visibilitychange", syncShareStream);
+
+// onShare draws one event. The server names rigs and pools by index, in the
+// same order /status lists them, so they are resolved against the latest poll.
+//
+// A share reaching the pool is drawn as the SAME dot that brought it to the
+// gateway, carrying on. Drawn independently, they looked like two unrelated
+// streams: the rig's dot reaches the gateway two legs after the share was
+// accepted there, while the pool's acceptance arrives a fraction of a second
+// after it -- so the pool's dot left the gateway before the share it stood
+// for had visibly arrived.
+//
+// So a pool acceptance becomes a credit on its gateway, and a rig's dot that
+// arrives finding one carries on to the pool; one that finds none stops at
+// the gateway. DATUM does not say WHICH share the pool accepted, so credits
+// are matched by count, in order -- and with the rotation never putting two
+// rigs on one gateway, the count is all there is to match. A credit nothing
+// claims (the pool count is gateway-wide: anything else mining through the
+// gateway shows up too) is drawn from the gateway on its own.
+function onShare(ev) {
+  if (!latest || flowMode !== "shares") return;
+  var pool = latest.pools[ev.pool];
+  if (!pool) return;
+  if (ev.k === "gw") {
+    var rig = latest.rigs[ev.rig];
+    if (!rig) return;
+    var groups = flowGroupsByKey();
+    var legs = [groups["rig:" + rig.name], groups["gw:" + rig.name + ":" + pool.name]]
+      .filter(Boolean);
+    if (!legs.length) return;
+    shareDot(legs, "pulse", DOT_R, function () {
+      if (!takeShareCredit(pool.name)) return null;
+      var g = flowGroupsByKey()["pool:" + pool.name];
+      return g ? { leg: g, cls: "pulse beyond", r: DOT_R_BEYOND } : null;
+    });
+  } else if (ev.k === "pool") {
+    var n = Math.min(ev.n || 1, SHARE_BATCH_MAX);
+    for (var i = 0; i < n; i++) addShareCredit(pool.name, SHARE_POOL_READ_MS * i / n);
+  }
+}
+
+function flowGroupsByKey() {
+  var m = {};
+  flowGroups.forEach(function (g) { m[g.key] = g; });
+  return m;
+}
+
+function addShareCredit(poolName, spreadMs) {
+  var credit = { taken: false };
+  (shareCredits[poolName] = shareCredits[poolName] || []).push(credit);
+  setTimeout(function () {
+    var list = shareCredits[poolName] || [];
+    var at = list.indexOf(credit);
+    if (at >= 0) list.splice(at, 1);
+    if (credit.taken) return;
+    var g = flowGroupsByKey()["pool:" + poolName];
+    if (g) shareDot([g], "pulse beyond", DOT_R_BEYOND, null);
+  }, SHARE_CREDIT_MS + spreadMs);
+}
+
+function takeShareCredit(poolName) {
+  var list = shareCredits[poolName] || [];
+  for (var i = 0; i < list.length; i++) {
+    if (!list[i].taken) {
+      list[i].taken = true;
+      return true;
+    }
+  }
+  return false;
+}
+
+// shareDot sends one dot along a chain of legs, end to end, then disposes of
+// it. One-shot Web Animations rather than the looping CSS one: a share makes
+// one trip. When the legs run out, more() -- if given -- may hand it one
+// further leg to continue on, which is how a share carries on to the pool.
+function shareDot(legs, cls, r, more) {
+  if (flowMode !== "shares" || !motionOn() || document.hidden) return;
+  var layer = $("links");
+  // A redraw since this was scheduled has replaced these lines; their
+  // geometry may be stale and their layer is gone.
+  if (!legs[0].path.isConnected) return;
+  var c = svgEl("circle", { r: r, "class": cls });
+  c.style.offsetRotate = "0deg";
+  if (legs[0].heat) c.style.setProperty("--heat", legs[0].heat);
+  layer.appendChild(c);
+  legs = legs.slice();
+  var cur = null, gone = false, timer = null;
+  function done() {
+    if (gone) return;
+    gone = true;
+    clearTimeout(timer);
+    if (cur) cur.cancel();
+    if (c.parentNode) c.parentNode.removeChild(c);
+  }
+  // Cancelled animations never finish, and background tabs throttle the ones
+  // that would: the timer is what guarantees the node goes. See fireSpark.
+  // Re-armed per leg, since a continuation lengthens the trip.
+  function arm() {
+    clearTimeout(timer);
+    timer = setTimeout(done, SHARE_LEG_MS + 1000);
+  }
+  function next() {
+    if (gone) return;
+    if (!legs.length && more) {
+      var m = more();
+      more = null;
+      if (m && m.leg.path.isConnected) {
+        legs.push(m.leg);
+        c.setAttribute("class", m.cls);
+        c.setAttribute("r", m.r);
+      }
+    }
+    if (!legs.length || !c.isConnected) return done();
+    var leg = legs.shift();
+    c.style.offsetPath = "path('" + leg.dstr + "')";
+    c.style.setProperty("--heat", leg.heat || 0);
+    if (cur) cur.cancel();
+    cur = c.animate({ offsetDistance: ["0%", "100%"] }, { duration: SHARE_LEG_MS });
+    cur.onfinish = next;
+    arm();
+  }
+  next();
+}
+
+// refreshFlow brings every carrying link up to date with the live numbers.
+function refreshFlow(d) {
+  syncShareStream();
+  if (!flowGroups.length) return;
+  var shares = flowShares(d);
+  flowGroups.forEach(function (g) {
+    var v = shares[g.key] || NO_FLOW;
+
+    var rate = flowRate(v.share);
+    var rateMoved = Math.abs(rate - g.rate) / g.rate >= 0.02;
+    if (rateMoved) g.rate = rate;
+
+    var want = flowCount(v.share, g.els.length);
+    while (g.els.length > want) dropDot(g);
+    if (g.els.length < want) {
+      var at = g.els.map(dotProgress).filter(function (p) { return p !== null; });
+      while (g.els.length < want) {
+        var ph = widestGap(at);
+        at.push(ph);
+        addDot(g, ph, true);
+      }
+    }
+
+    // Rates are applied after the count, and on a redraw this is the first
+    // call: raiseActive() re-appends the nodes once they are made, and moving
+    // a node restarts its CSS animation, so no Animation handle taken before
+    // that point would still be the live one.
+    if (rateMoved) g.els.forEach(function (el) { setDotRate(el, rate); });
+
+    var heat = flowHeat(v);
+    if (heat !== g.heat) {
+      g.heat = heat;
+      var targets = g.els.concat(g.halo ? [g.path, g.halo] : [g.path]);
+      targets.forEach(function (el) { el.style.setProperty("--heat", heat); });
+    }
+  });
 }
 
 function drawLinks(d, entered, force) {
@@ -1692,10 +2178,13 @@ function drawLinks(d, entered, force) {
   var sig = linkSig(d, host);
   if (!force && sig === lastLinkSig && !hasEntries(entered)) {
     refreshLinkLabels(d);
+    refreshFlow(d);
     return;
   }
   lastLinkSig = sig;
   linkLabels = [];
+  flowGroups = [];
+  var shares = flowShares(d);
 
   var s = $("links");
   // CANCEL BEFORE DISCARDING.
@@ -1725,17 +2214,25 @@ function drawLinks(d, entered, force) {
     var a = anchor(fr, host, tr), b = anchor(tr, host, fr);
     var dstr = curve(a, b);
     var id = "lp" + (++pathSeq);
+    // The glow under a hot line. Drawn as a wide, faint stroke beneath it
+    // rather than an SVG filter: a filtered element is re-rasterised whenever
+    // anything in this layer animates, which is always.
+    var halo = null;
+    if (active && flowMode !== "even" && heatOn) {
+      halo = svgEl("path", { d: dstr, "class": "halo" });
+      s.appendChild(halo);
+    }
     var p = svgEl("path", { d: dstr, id: id, "class": "link " + (active ? "active" : "idle") });
     s.appendChild(p);
 
     var extras = [];
-    if (active && motionOn()) {
-      // Half speed. A pulse that crosses the diagram in under three seconds
-      // reads as a flicker at the edge of vision rather than work moving.
-      var c = svgEl("circle", { r: 3.2, "class": "pulse" });
-      travelAlong(c, dstr);
-      s.appendChild(c);
-      extras.push(c);
+    if (active) {
+      // Half speed at the base rate. A pulse that crosses the diagram in
+      // under three seconds reads as a flicker at the edge of vision rather
+      // than work moving -- which is why even the scaled fastest stays at 2.5.
+      // Registered even with motion off, which only means zero dots: heat is
+      // colour, not motion, and still applies.
+      extras = flowGroup(s, p, halo, dstr, labelKey, shares[labelKey], DOT_R, "pulse");
     }
 
     if (label) {
@@ -1752,7 +2249,7 @@ function drawLinks(d, entered, force) {
       s.appendChild(t);
       extras.push(t);
     }
-    if (active) deferred.push([p].concat(extras));
+    if (active) deferred.push((halo ? [halo, p] : [p]).concat(extras));
     return { path: p, d: dstr };
   }
 
@@ -1822,11 +2319,11 @@ function drawLinks(d, entered, force) {
     // gateway made the diagram look like work arrived there and stopped,
     // which is the opposite of what this column exists to say.
     var extras = [];
-    if (carrying && motionOn()) {
-      var c = svgEl("circle", { r: 2.6, "class": "pulse beyond" });
-      travelAlong(c, curve(a, b));
-      s.appendChild(c);
-      extras.push(c);
+    // Its dots run hot with the rest, but the line itself does not: this hop
+    // is drawn muted because switchyard does not own it, and that stays true
+    // however much work crosses it.
+    if (carrying) {
+      extras = flowGroup(s, path, null, curve(a, b), "pool:" + p.name, shares["pool:" + p.name], DOT_R_BEYOND, "pulse beyond");
     }
     var at = path.getPointAtLength(path.getTotalLength() * 0.5);
     var t = svgEl("text", {
@@ -1839,6 +2336,9 @@ function drawLinks(d, entered, force) {
   });
 
   raiseActive();
+  // After raiseActive, not before: see refreshFlow on why the Animation
+  // handles are taken only once the nodes have stopped moving.
+  refreshFlow(d);
 }
 
 function fireSpark(_ignored, dstr) {
@@ -2560,6 +3060,47 @@ function applyMotion(mode) {
   });
 })();
 
+function applyFlow(mode) {
+  flowMode = mode;
+  var b = $("flowBtn");
+  b.textContent = "flow: " + mode;
+  // Shares mode has a running cost the others do not: while it is open,
+  // switchyard reads every gateway's status page four times a second. Said
+  // next to the diagram for as long as it is on, not once on the way in,
+  // because a page left open all day keeps paying it long after a one-time
+  // warning has been dismissed and forgotten.
+  var cost = mode === "shares"
+    ? "shares mode: switchyard is reading every gateway 4× a second while this is open"
+    : "";
+  if ($("flowCost").textContent !== cost) $("flowCost").textContent = cost;
+  b.className = mode === "even" ? "" : "armed";
+  try { localStorage.setItem(FLOW_KEY, mode); } catch (e) { /* private browsing */ }
+  // Redrawn rather than refreshed: standing dots and the halos under hot
+  // lines differ by mode, and even must come back exactly as it always looked.
+  if (latest && built) drawLinks(latest, {}, true);
+}
+
+function applyHeat(on) {
+  heatOn = on;
+  try { localStorage.setItem(HEAT_KEY, on ? "on" : "off"); } catch (e) { /* private browsing */ }
+  // Redrawn, as for the flow mode: the halos exist only while heat is on.
+  if (latest && built) drawLinks(latest, {}, true);
+}
+
+(function initFlow() {
+  // Defaults to scaled. Even is the old behaviour, kept for anyone who finds
+  // a busy diagram harder to read than an informative one; shares is the
+  // experimental one-dot-per-real-share view.
+  var mode = "scaled";
+  try { mode = localStorage.getItem(FLOW_KEY) || "scaled"; } catch (e) { /* private browsing */ }
+  var order = ["scaled", "shares", "even"];
+  if (order.indexOf(mode) < 0) mode = "scaled";
+  applyFlow(mode);
+  $("flowBtn").addEventListener("click", function () {
+    applyFlow(order[(order.indexOf(flowMode) + 1) % order.length]);
+  });
+})();
+
 $("resetBtn").addEventListener("click", function () {
   var b = $("resetBtn");
   b.disabled = true;
@@ -3006,6 +3547,38 @@ function renderConfigForm() {
   pools.appendChild(addPool);
   body.appendChild(pools);
 
+  // ---- this browser, last ----
+  // Display preferences, not configuration. They live here because this is
+  // where settings are looked for, but they are nothing to do with
+  // config.json: saving that restarts every rig session and resets every
+  // statistic, which is no price to pay for a colour. So they apply on the
+  // click, are kept in this browser, and Save and Cancel never touch them.
+  var local = el("div", "group");
+  local.appendChild(el("h3", null, "This browser"));
+  local.appendChild(el("p", "note",
+    "Display preferences. These apply as soon as you click and are kept in "
+    + "this browser only — they are not part of config.json, and Save "
+    + "and Cancel leave them alone."));
+  var heatRow = el("div", "localrow");
+  var heatBtn = el("button", "btn tiny");
+  heatBtn.type = "button";
+  function paintHeat() {
+    heatBtn.textContent = "Heat: " + (heatOn ? "on" : "off");
+    heatBtn.className = "btn tiny" + (heatOn ? " primary" : "");
+  }
+  paintHeat();
+  heatBtn.addEventListener("click", function () { applyHeat(!heatOn); paintHeat(); });
+  heatRow.appendChild(heatBtn);
+  var heatHelp = el("button", "help", "?");
+  heatHelp.type = "button";
+  heatHelp.dataset.help = "cfgHeat";
+  heatHelp.setAttribute("aria-label", "What is this?");
+  heatRow.appendChild(heatHelp);
+  heatRow.appendChild(el("span", "hintline",
+    "Busy links glow from green toward amber. Off keeps every line green."));
+  local.appendChild(heatRow);
+  body.appendChild(local);
+
   wireAllHelp();
   checkDwell();
 }
@@ -3198,6 +3771,42 @@ var HELP_TEXT = {
     + "<p><b>auto</b> follows your system's <i>reduce motion</i> setting, which "
     + "is on more often than people expect \u2014 so the button shows what auto "
     + "currently resolves to. Click to force on or off.</p>",
+
+  cfgHeat:
+    "<p>Whether carrying links in the flow diagram <i>run hot</i>: a link doing "
+    + "far more than an even split of the fleet's work shifts from green "
+    + "toward amber, with a faint glow.</p>"
+    + "<p>Off keeps every line plain green. Dot count and speed still follow "
+    + "the hashrate either way; heat applies in every <b>flow</b> mode "
+    + "except <b>even</b>.</p>",
+
+  flowMode:
+    "<p>How the carrying links in the flow diagram show the work on them.</p>"
+    + "<p><b>scaled</b> follows each link's share of the fleet's hashrate: more "
+    + "of the fleet means more dots (one to four) and faster ones, and a link "
+    + "doing far more than an even split would give it runs <i>hot</i>, from "
+    + "green toward gold. A link at or below its fair share stays plain green "
+    + "— small is not the same as idle. Heat can be switched off on its "
+    + "own under <b>configure</b>.</p>"
+    + "<p>The rate behind it is each rig's work over the last two minutes, "
+    + "measured across rotations, so a rotation does not reset it.</p>"
+    + "<p><b>shares</b> (experimental) draws one dot per real share instead, "
+    + "the moment it happens. From a rig to its gateway, each is a share that "
+    + "gateway accepted from that rig, sent from the very reply that accepted "
+    + "it. From a gateway to its pool, each is a share the <i>pool</i> "
+    + "accepted, which only the gateway's status page shows: while this mode "
+    + "is open switchyard reads those pages four times a second, so these land "
+    + "within about a quarter second. That count is for the whole gateway. The "
+    + "two legs count different things and are not meant to match.</p>"
+    + "<p><b>It has a cost the others do not:</b> those four reads a second, to "
+    + "every gateway, for as long as a page is open in this mode. Small — "
+    + "a few kilobytes each, on your own network — but continuous, so it "
+    + "stops when you leave the mode or hide the tab. Every vardiff-tuned "
+    + "miner sends shares at about the same pace whatever its hashrate, so "
+    + "this shows that work is flowing, not who is doing it; <b>scaled</b> "
+    + "shows that.</p>"
+    + "<p><b>even</b> gives every link one green dot at the same speed.</p>"
+    + "<p>Motion off stops the dots; the heat still shows.</p>",
 
   reset:
     "<p>Zero every statistic and restart the averaging clock.</p>"

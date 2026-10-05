@@ -34,6 +34,10 @@ type coordinator struct {
 	// failure is visible.
 	gw *gatewayWatcher
 
+	// feed is the server's share event feed, handed to each generation as it
+	// is built. Nil outside a server, and every use of it is nil-safe.
+	feed *shareFeed
+
 	mu           sync.Mutex
 	step         int
 	rotations    int
@@ -128,7 +132,7 @@ func newCoordinator(cfg config) *coordinator {
 	for i, rig := range cfg.Rigs {
 		co.ups[i] = make([]*upstream, len(cfg.Pools))
 		for j, pool := range cfg.Pools {
-			co.ups[i][j] = newUpstream(co, i, rig, pool)
+			co.ups[i][j] = newUpstream(co, i, j, rig, pool)
 		}
 	}
 	return co

@@ -21,7 +21,7 @@ import (
 func fanInUpstream(t *testing.T) *upstream {
 	t.Helper()
 	cfg := testConfig()
-	u := newUpstream(newCoordinator(cfg), 0, cfg.Rigs[0], cfg.Pools[0])
+	u := newUpstream(newCoordinator(cfg), 0, 0, cfg.Rigs[0], cfg.Pools[0])
 	u.ready = true
 	u.extranonce1 = "a1b2c3d4"
 	u.extranonce2Size = 8
