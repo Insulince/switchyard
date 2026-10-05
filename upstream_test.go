@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -205,5 +206,64 @@ func TestCancelledGenerationHangsUpOnTheGateway(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("run() did not return after cancel")
+	}
+}
+
+// A share is worth the difficulty of the JOB it was mined on, not the latest
+// set_difficulty: a new difficulty applies to jobs sent after it, and work
+// already in flight was done at the old one. DATUM credits it that way
+// (stratum_job_diffs). Crediting at the latest value instead turned a solo
+// gateway's vardiff ramp -- it starts a rig at difficulty 1 and climbed to
+// 268M within a minute -- into 4.3 million TH/s from one rig.
+func TestShareIsCreditedAtItsJobsDifficulty(t *testing.T) {
+	u := fanInUpstream(t)
+	a, b := net.Pipe()
+	go func() { _, _ = io.Copy(io.Discard, b) }()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+	u.w = newConnWriter(a)
+	s, peer := pipeSession(t, u.co, "w")
+	go func() { _, _ = io.Copy(io.Discard, peer) }()
+
+	push := func(line string) {
+		var m message
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatal(err)
+		}
+		u.handleNotification(&m, []byte(line))
+	}
+	notify := func(job string) {
+		push(fmt.Sprintf(`{"id":null,"method":"mining.notify","params":[%q,"ph","c1","c2",[],"20000000","1d00ffff","5f5e1000",true]}`, job))
+	}
+	setDiff := func(d int) {
+		push(fmt.Sprintf(`{"id":null,"method":"mining.set_difficulty","params":[%d]}`, d))
+	}
+	accept := func(job string) {
+		t.Helper()
+		params := json.RawMessage(fmt.Sprintf(`["w",%q,"00000000000000","5f5e1000","00000000"]`, job))
+		if err := u.submit(s, json.RawMessage("1"), params); err != nil {
+			t.Fatal(err)
+		}
+		id := u.nextID + 100
+		u.routeResponse(&message{ID: json.RawMessage(strconv.FormatUint(id, 10)), Result: json.RawMessage("true")})
+	}
+
+	setDiff(1)
+	notify("cheap")
+	setDiff(268435456)
+	notify("dear")
+
+	accept("cheap")
+	if u.acceptedWork != 1 {
+		t.Fatalf("share on the difficulty-1 job credited %d, want 1", u.acceptedWork)
+	}
+	accept("dear")
+	if want := uint64(1 + 268435456); u.acceptedWork != want {
+		t.Fatalf("after the dear share, work = %d, want %d", u.acceptedWork, want)
+	}
+	// A job this session never saw -- one from before a reconnect -- falls
+	// back to the current difficulty, which is what was credited before.
+	accept("unknown")
+	if want := uint64(1 + 2*268435456); u.acceptedWork != want {
+		t.Errorf("unknown job: work = %d, want %d", u.acceptedWork, want)
 	}
 }

@@ -47,6 +47,11 @@
      not an alarm. The climbing counter beside it carries the urgency, which
      is to say none. */
   --waiting:   #7f93ad;
+  /* The solo slot (README "Solo slot"). An IDENTITY, never a status: it
+     says "this one is solo by design", not "good" or "bad". Chosen to be
+     unlike every status colour here -- green, red, amber, gold -- so it
+     cannot be read as one. */
+  --solo:      #8b7cf6;
 }
 
 * { box-sizing: border-box; }
@@ -220,6 +225,11 @@ header button[title], .tip[title] { cursor: pointer; }
   font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim);
 }
 .card .chead .spacer { flex: 1; }
+.card.solo { border-color: var(--solo); border-style: dashed; }
+.card .chead .solobadge {
+  font-size: 0.6rem; letter-spacing: .12em; color: var(--solo);
+  border: 1px solid var(--solo); border-radius: 3px; padding: 0 0.3rem;
+}
 .fgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.55rem 0.8rem; }
 @media (max-width: 640px) { .fgrid { grid-template-columns: 1fr; } }
 .f { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
@@ -280,6 +290,7 @@ header button[title], .tip[title] { cursor: pointer; }
 .vline:empty { display: none; }
 .vline.ok { color: var(--good); }
 .vline.err { color: var(--bad); }
+.vline.warn { color: var(--accent); }
 .vline b { font-weight: 400; }
 .trio .f { gap: 0.2rem; }
 .rigwrap { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.6rem; }
@@ -530,6 +541,24 @@ header .help { margin-left: 0.35rem; }
 .link.beyond.cut { stroke: var(--border); stroke-dasharray: 3 5; opacity: .7; }
 .linklabel.beyond.cut { fill: var(--border); }
 .linklabel.beyond { fill: var(--heartbeat); font-style: italic; }
+/* The solo leg: the gateway's work goes no further than your own node until
+   a block is found, so this hop is drawn as a destination, not a flow --
+   dashed, and with no dots on it in any mode. */
+.link.beyond.solo { stroke: var(--solo); stroke-dasharray: 4 4; opacity: .7; }
+.linklabel.beyond.solo { fill: var(--solo); }
+.node.pool.solo { border-style: dashed; border-color: var(--solo); }
+.node.pool.solo .n { color: var(--solo); }
+.node.pool.solo.live { border-color: var(--solo); box-shadow: 0 0 0 1px rgba(139,124,246,.25); }
+/* Marked solo, but its gateway mines to a pool: the node is crossed out
+   rather than left looking like a solo slot, because everything it would say
+   as one -- "no pool", the odds -- would be false. */
+.node.pool.solo.invalid {
+  border-color: var(--accent); box-shadow: none;
+  background: repeating-linear-gradient(135deg,
+    rgba(217,154,43,.10) 0 6px, transparent 6px 12px);
+}
+.node.pool.solo.invalid .n { color: var(--dim); text-decoration: line-through; }
+.node .m .solo { color: var(--solo); }
 
 /* Port rows double as the anchor points for this rig's connectors. That is
    what untangles the diagram: every line into and out of switchyard starts at
@@ -1086,6 +1115,39 @@ function waitLabel(r) {
 }
 
 function ths(v) { v = v || 0; if (v === 0) return "0.00"; return v < 0.01 ? v.toFixed(3) : v.toFixed(2); }
+
+// The solo node's title. One constant, because the node is built once and
+// its heading is re-checked every poll.
+var SOLO_TITLE = "Solo \u2192 network";
+
+// Odds of the solo slot finding a block, at the hashrate it has actually
+// averaged. A block takes difficulty x 2^32 hashes on average, so the
+// expected wait is that over the hash rate; the chance in one day follows
+// from block-finding being a Poisson process. Null until both inputs exist,
+// so the card never shows Infinity or NaN.
+function soloOdds(avgThs, difficulty) {
+  if (!(avgThs > 0) || !(difficulty > 0)) return null;
+  var secs = difficulty * 4294967296 / (avgThs * 1e12);
+  var perDay = 1 - Math.exp(-86400 / secs);
+  return { secs: secs, oneIn: perDay > 0 ? 1 / perDay : Infinity };
+}
+
+function longSpan(secs) {
+  var days = secs / 86400;
+  if (days >= 730) return Math.round(days / 365.25).toLocaleString("en-US") + " yrs";
+  if (days >= 2) return Math.round(days) + " days";
+  if (secs >= 7200) return Math.round(secs / 3600) + " hrs";
+  return Math.max(1, Math.round(secs / 60)) + " min";
+}
+
+function bigCount(n) {
+  if (!isFinite(n)) return "\u221e";
+  if (n >= 1e12) return (n / 1e12).toFixed(1) + "T";
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+  return Math.max(1, Math.round(n)).toString();
+}
 function ago(then, now) {
   if (!then || then.indexOf("0001-") === 0) return "never";
   var s = Math.max(0, Math.round((Date.parse(now) - Date.parse(then)) / 1000));
@@ -1241,7 +1303,16 @@ markOf(n, "<p><b>The pool behind that gateway</b> — and the one thing on this 
       + "— and it is what the fairness band below is measuring.</p>"
       + "<p>The name and address are labels from "
       + "<span class=\"k\">config.json</span>, not anything discovered.</p>");
-    n.appendChild(el("div", "n", p.name));
+    n.appendChild(el("div", "n", p.solo ? SOLO_TITLE : p.name));
+    if (p.solo) {
+markOf(n, "<p><b>The solo slot.</b> The gateway in front of this is "
+        + "configured with no pool: while a rig is on it, it is mining solo "
+        + "from your own node.</p>"
+        + "<p>Nothing crosses this last hop until a block is found. When one "
+        + "is, your node broadcasts it to the network and the whole reward "
+        + "is yours, which is why the line here carries no dots.</p>"
+        + "<p>It gets the same share of rotation time as every pool.</p>");
+    }
     var host = el("div", "m"), avg = el("div", "m"), health = el("div", "m");
     n.appendChild(host); n.appendChild(avg); n.appendChild(health);
     pools.appendChild(n);
@@ -1286,6 +1357,16 @@ function setClass(node, v) {
 //
 // The attribute is now set once, empty, purely so the selector and the wiring
 // sweep can still find the element. The text lives on a plain property.
+// escHtml makes text safe to splice into a tooltip's HTML. Anything read off
+// a gateway's status page is that gateway's to choose -- the pool host is
+// matched as "any run of non-spaces" -- so it goes through here, not straight
+// into markup.
+function escHtml(v) {
+  return String(v).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+
 function markOf(node, html) {
   if (!node) return;
   if (node.__mark === html) return;
@@ -1468,7 +1549,22 @@ markOf(n.sh, "<p>Shares this gateway <b>accepted</b> and <b>rejected</b> from an
     // Prime connection fails -- it solo mines under its own tag and keeps
     // accepting shares, so every other number on this card stays healthy.
     var unpooled = !!(p.health && p.health.unpooled);
-    if (unpooled) {
+    var mismatch = !!(p.solo && p.health && p.health.soloMismatch);
+    if (mismatch) {
+      setMeta(n.mode, [{ tag: "span", cls: "warn",
+        text: "marked solo, but this gateway mines to " + p.health.poolHost }]);
+markOf(n.mode, "<p><b>This entry is marked solo, but its gateway is pointed at "
+        + "a pool.</b> Work rotated here is going to <span class=\"k\">"
+        + escHtml(p.health.poolHost) + "</span>, not being mined solo.</p>"
+        + "<p>Nothing is stopped for this. To mine solo here, remove the "
+        + "gateway's <span class=\"k\">pool_host</span> and restart it; to "
+        + "keep the pool, add this gateway as an ordinary pool instead.</p>");
+    } else if (p.solo) {
+      setMeta(n.mode, [{ tag: "span", cls: "solo", text: "solo by design" }]);
+markOf(n.mode, "<p><b>This gateway has no pool, on purpose.</b> It is the "
+        + "solo slot: configured without a <span class=\"k\">pool_host</span>, "
+        + "it builds from your own node and keeps any block it finds.</p>");
+    } else if (unpooled) {
       setMeta(n.mode, [{ tag: "span", cls: "warn",
         text: p.health.status + " \u2014 solo mining \u2014 see DATUM Gateway log for more information" }]);
 markOf(n.mode, "<p><b>This gateway has no pool.</b> Its Prime connection is down "
@@ -1483,7 +1579,7 @@ markOf(n.mode, "<p><b>This gateway has no pool.</b> Its Prime connection is down
 
     var cls = "node ";
     if (!p.ready) cls += "offline";
-    else if (unpooled) cls += "degraded";
+    else if (unpooled || mismatch) cls += "degraded";
     else if (p.occupants.length) cls += "live";
     else cls += "dark";
     // Preserve a running arrive/depart animation: className is rewritten every
@@ -1501,22 +1597,29 @@ markOf(n.mode, "<p><b>This gateway has no pool.</b> Its Prime connection is down
     if (!n) return;
     // The label can be edited under a node that already exists.
     var poolHeading = n.box.querySelector(".n");
-    if (poolHeading && poolHeading.textContent !== p.name) poolHeading.textContent = p.name;
+    var poolTitle = p.solo ? SOLO_TITLE : p.name;
+    if (poolHeading && poolHeading.textContent !== poolTitle) poolHeading.textContent = poolTitle;
 
-    setMeta(n.host, p.host
-      ? [{ tag: "span", text: p.host }]
-      : [{ tag: "span", cls: "unknown", text: "pool not identified" }]);
+    if (p.solo) {
+      setMeta(n.host, p.health && p.health.soloMismatch
+        ? [{ tag: "span", cls: "warn", text: "not solo: mines to " + p.health.poolHost }]
+        : [{ tag: "span", cls: "solo", text: "your node \u00b7 no pool" }]);
+    } else {
+      setMeta(n.host, p.host
+        ? [{ tag: "span", text: p.host }]
+        : [{ tag: "span", cls: "unknown", text: "pool not identified" }]);
 markOf(n.host, p.host
-      ? "<p>The pool this gateway is connected to.</p>"
-        + "<p>Switchyard cannot see it directly — DATUM owns that session "
-        + "— so this came from the gateway's own status page, read once "
-        + "when you pressed <b>Inspect</b>, or was typed into "
-        + "<span class=\"k\">config.json</span> by hand. It is a label: nothing "
-        + "routes on it, and switchyard does not re-check it.</p>"
-      : "<p>Switchyard has <b>no way to discover</b> which pool sits behind a "
-        + "gateway on its own. DATUM holds that session, not switchyard.</p>"
-        + "<p>The gateway will say, though. Open <b>CONFIGURE</b>, give this "
-        + "pool its gateway status-page address, and press <b>Inspect</b>.</p>");
+        ? "<p>The pool this gateway is connected to.</p>"
+          + "<p>Switchyard cannot see it directly — DATUM owns that session "
+          + "— so this came from the gateway's own status page, read once "
+          + "when you pressed <b>Inspect</b>, or was typed into "
+          + "<span class=\"k\">config.json</span> by hand. It is a label: nothing "
+          + "routes on it, and switchyard does not re-check it.</p>"
+        : "<p>Switchyard has <b>no way to discover</b> which pool sits behind a "
+          + "gateway on its own. DATUM holds that session, not switchyard.</p>"
+          + "<p>The gateway will say, though. Open <b>CONFIGURE</b>, give this "
+          + "pool its gateway status-page address, and press <b>Inspect</b>.</p>");
+    }
 
     var g = grade(p);
     setMeta(n.avg, [
@@ -1549,6 +1652,46 @@ markOf(n.avg, "<p><b>Long-run average</b> since this process started, against th
     // is the only place one specific failure is visible: a gateway can accept
     // every share locally while the pool rejects every one of them, and
     // nothing switchyard measures itself would look wrong.
+    // The solo slot has no pool to accept or refuse anything, so the
+    // pool-side counters below mean nothing here. What solo DOES mean, at
+    // this size, is odds -- shown at the hashrate the slot has averaged.
+    if (p.solo && p.health && p.health.soloMismatch) {
+      // No odds: this slot's work is reaching a pool, not being mined solo.
+      setMeta(n.health, [{ tag: "span", cls: "unknown", text: "no odds while its gateway is pooled" }]);
+markOf(n.health, "<p><b>This slot is not mining solo.</b> It is marked solo in "
+        + "the config, but its gateway is pointed at <span class=\"k\">"
+        + escHtml(p.health.poolHost) + "</span>, so its work goes to that pool "
+        + "and there are no solo odds to show.</p>"
+        + "<p>See the gateway card for how to resolve it. Nothing is stopped "
+        + "meanwhile.</p>");
+      setClass(n.box, "node pool solo invalid");
+      return;
+    }
+    if (p.solo) {
+      var odds = soloOdds(p.ths, p.health && p.health.networkDifficulty);
+      if (odds) {
+        setMeta(n.health, [
+          "~", { text: longSpan(odds.secs) }, " to a block",
+          { tag: "br" },
+          "1 in ", { text: bigCount(odds.oneIn) }, " chance per day"
+        ]);
+      } else {
+        setMeta(n.health, [{ tag: "span", cls: "unknown", text: "odds after the first shares" }]);
+      }
+markOf(n.health, "<p><b>Odds of this slot finding a block</b>, at the "
+        + "<span class=\"k\">" + ths(p.ths) + " TH/s</span> it has averaged "
+        + "this run.</p>"
+        + "<p>A block takes the network difficulty \u00d7 2\u00b3\u00b2 hashes "
+        + "on average, read from the solo gateway's own page. Divided by the "
+        + "slot's hashrate, that is the expected wait; the daily chance "
+        + "follows from blocks arriving at random.</p>"
+        + "<p>Both move with the difficulty and with the time rotation gives "
+        + "this slot. They are odds, not a schedule: a block can come on any "
+        + "share, or never.</p>");
+      setClass(n.box, "node pool solo" + (p.occupants.length ? " live" : ""));
+      return;
+    }
+
     var h = p.health;
     if (!h) {
       setMeta(n.health, [{ tag: "span", cls: "unknown", text: "pool-side result unknown" }]);
@@ -1585,8 +1728,9 @@ markOf(n.health, "<p><b>What the POOL did with the work</b>, from the gateway's 
               + "the gateway and this dashboard both report everything as "
               + "accepted. Work these two in order:</p>"
               + "<p><b>1. Is <span class=\"k\">pool_pass_full_users</span> "
-              + "false</b> on this gateway? It is the DATUM default and it is "
-              + "what switchyard requires. With it true, the pool is credited "
+              + "false</b> on this gateway? DATUM defaults it to true, so a "
+              + "gateway nobody changed has it wrong, and false is what "
+              + "switchyard requires. With it true, the pool is credited "
               + "by whatever your miner sends as a username — and a worker "
               + "name is not a payout address, so every share is refused. "
               + "Measured behaviour is exactly 100% rejection.</p>"
@@ -2310,14 +2454,17 @@ function drawLinks(d, entered, force) {
     // it: the hop is severed, and a pulsing teal line into a pool that is
     // receiving nothing would be the exact invention this style exists to
     // avoid.
-    var cut = !!(p.health && p.health.unpooled);
-    var carrying = p.occupants.length > 0 && !cut;
+    // The solo leg carries nothing until a block is found, so it is never
+    // "carrying": no dots, no flow group, in any mode. See .link.beyond.solo.
+    var solo = !!p.solo;
+    var cut = !solo && !!(p.health && p.health.unpooled);
+    var carrying = !solo && p.occupants.length > 0 && !cut;
     var fr = gn.box.getBoundingClientRect(), tr = pn.box.getBoundingClientRect();
     var a = anchor(fr, host, tr), b = anchor(tr, host, fr);
     var pid = "lp" + (++pathSeq);
     var path = svgEl("path", {
       d: curve(a, b), id: pid,
-      "class": "link beyond" + (carrying ? " on" : "") + (cut ? " cut" : "")
+      "class": "link beyond" + (carrying ? " on" : "") + (cut ? " cut" : "") + (solo ? " solo" : "")
     });
     s.appendChild(path);
     // The last leg pulses too when it is carrying. Stopping the motion at the
@@ -2332,9 +2479,9 @@ function drawLinks(d, entered, force) {
     }
     var at = path.getPointAtLength(path.getTotalLength() * 0.5);
     var t = svgEl("text", {
-      x: at.x, y: at.y - 7, "class": "linklabel beyond" + (cut ? " cut" : ""), "text-anchor": "middle"
+      x: at.x, y: at.y - 7, "class": "linklabel beyond" + (cut ? " cut" : "") + (solo ? " solo" : ""), "text-anchor": "middle"
     });
-    t.textContent = cut ? "not connected" : "via DATUM";
+    t.textContent = solo ? "solo" : (cut ? "not connected" : "via DATUM");
     s.appendChild(t);
     extras.push(t);
     if (carrying) deferred.push([path].concat(extras));
@@ -2540,7 +2687,7 @@ function renderConv(d) {
 
   d.pools.forEach(function (p) {
     var row = el("div", "crow");
-    row.appendChild(el("div", "cname", p.name));
+    row.appendChild(el("div", "cname", p.solo ? SOLO_TITLE : p.name));
 
     var bar = el("div", "bar");
     var g = grade(p);
@@ -2758,7 +2905,9 @@ function renderPools(d) {
 
     var c0 = document.createElement("td");
     c0.appendChild(el("span", "sdot " + (p.ready ? "up" : "down")));
-    c0.appendChild(document.createTextNode(p.name));
+    // Solo-ness comes from the flag; the name the row is keyed on is only a
+    // label, never a marker.
+    c0.appendChild(document.createTextNode(p.solo ? SOLO_TITLE : p.name));
     tr.appendChild(c0);
 
     var c1 = document.createElement("td");
@@ -3418,11 +3567,13 @@ function renderConfigForm() {
     pools.appendChild(el("div", "empty", "No pools yet. Add the first one below."));
   }
   draft.pools.forEach(function (pool, i) {
-    var card = el("div", "card");
-    card.appendChild(cardHead("Pool " + (i + 1), function () {
+    var card = el("div", pool.solo ? "card solo" : "card");
+    var head = cardHead(pool.solo ? "Solo gateway" : "Pool " + (i + 1), function () {
       draft.pools.splice(i, 1);
       renderConfigForm();
-    }));
+    });
+    if (pool.solo) head.insertBefore(el("span", "solobadge", "SOLO"), head.children[1]);
+    card.appendChild(head);
     var grid = el("div", "fgrid");
 
     var nameField, nameInput, statusHint, stratumHint;
@@ -3462,13 +3613,51 @@ function renderConfigForm() {
         // only the failure meant a correct stratum port went unmentioned
         // whenever the status port was wrong, so an operator who was halfway
         // there saw the same thing as one who had it all wrong.
-        if (res.statusOK) {
+        if (res.statusOK && pool.solo) {
+          // No name to fetch or keep: a solo entry has no pool to name, and
+          // the server rejects one that carries a name.
+          delete pool.name;
+          if (res.info.poolHost === "N/A") {
+            verdict(statusHint, "Status page", true,
+              "reached the DATUM gateway; no pool configured, mining solo");
+          } else {
+            verdict(statusHint, "Status page", "warn",
+              "this gateway is pointed at " + res.info.poolHost
+              + "; its work will go to that pool, not solo");
+          }
+        } else if (res.statusOK && res.info.poolHost === "N/A") {
+          // A gateway with no pool, added with "Add pool". Allowed -- it is
+          // the operator's call -- but almost always the wrong button, so
+          // say so and offer the right one. The tag DATUM prints here is the
+          // operator's own, not a pool's, so it is not taken as the name.
+          nameInput.value = pool.name = "";
+          var soloTaken = draft.pools.some(function (p) { return p.solo; });
+          verdict(statusHint, "Status page", "warn",
+            "this gateway has no pool configured \u2014 "
+            + (soloTaken
+                ? "it will mine solo, but a solo gateway is already set up"
+                : "did you mean to add it as the solo gateway?"));
+          if (!soloTaken) {
+            var swap = el("button", "btn tiny", "Make this the solo gateway");
+            swap.type = "button";
+            swap.addEventListener("click", function () {
+              // Re-checked at the click: the form may have changed since.
+              if (draft.pools.some(function (p) { return p.solo; })) return;
+              pool.solo = true;
+              delete pool.name;
+              renderConfigForm();
+            });
+            statusHint.appendChild(document.createTextNode(" "));
+            statusHint.appendChild(swap);
+          }
+        } else if (res.statusOK) {
           pool.name = res.info.tag || res.info.poolHost || "";
           nameInput.value = pool.name;
           verdict(statusHint, "Status page", true,
             "reached the DATUM gateway for " + res.info.poolHost);
         } else {
-          nameInput.value = pool.name = "";
+          if (pool.solo) delete pool.name;
+          else nameInput.value = pool.name = "";
           verdict(statusHint, "Status page", false, res.statusError);
         }
         verdict(stratumHint, "Stratum port", res.stratumOK,
@@ -3483,7 +3672,7 @@ function renderConfigForm() {
     // Leading with the subject means the two lines stay scannable as a pair
     // even when one of them wraps onto a second row.
     function verdict(line, label, ok, detail) {
-      line.className = "vline " + (ok ? "ok" : "err");
+      line.className = "vline " + (ok === "warn" ? "warn" : ok ? "ok" : "err");
       line.textContent = "";
       line.appendChild(el("b", null, label));
       line.appendChild(document.createTextNode(" \u00b7 " + detail));
@@ -3512,11 +3701,13 @@ function renderConfigForm() {
     });
     trio.appendChild(statusField);
 
-    nameField = field("Pool name", pool.name, {
-      readOnly: true, help: "cfgPoolName", placeholder: "fetched from the gateway"
-    });
-    nameInput = nameField.querySelector("input");
-    trio.appendChild(nameField);
+    if (!pool.solo) {
+      nameField = field("Pool name", pool.name, {
+        readOnly: true, help: "cfgPoolName", placeholder: "fetched from the gateway"
+      });
+      nameInput = nameField.querySelector("input");
+      trio.appendChild(nameField);
+    }
 
     // The results sit in their own full-width block BELOW the row rather than
     // under the field each belongs to. Attached to a field they were either in
@@ -3554,13 +3745,30 @@ function renderConfigForm() {
     // behind it -- and a save would then write that stale label back to disk.
     if (pool.statusPort) fetchTag(true);
   });
+  var poolAdds = el("div", "addrow");
   var addPool = el("button", "btn tiny add", "Add pool");
   addPool.type = "button";
   addPool.addEventListener("click", function () {
     draft.pools.push({ host: "127.0.0.1" });
     renderConfigForm();
   });
-  pools.appendChild(addPool);
+  poolAdds.appendChild(addPool);
+
+  // One solo slot is the supported way to mine solo alongside pools, so the
+  // button says so by switching off -- rather than letting a second one be
+  // added and refused on save.
+  var hasSolo = draft.pools.some(function (p) { return p.solo; });
+  var addSolo = el("button", "btn tiny add", "Add solo gateway");
+  addSolo.type = "button";
+  addSolo.disabled = hasSolo;
+  if (hasSolo) addSolo.title = "Only one solo gateway. Remove the existing one to add another.";
+  addSolo.addEventListener("click", function () {
+    draft.pools.push({ host: "127.0.0.1", solo: true });
+    renderConfigForm();
+  });
+  poolAdds.appendChild(addSolo);
+  poolAdds.appendChild(helpMarker("cfgSoloAdd"));
+  pools.appendChild(poolAdds);
   body.appendChild(pools);
 
   // ---- this browser, last ----
@@ -3991,6 +4199,13 @@ var HELP_TEXT = {
   cfgPoolName:
     "<p>Read from the gateway\u2019s coinbase tag \u2014 what this pool calls "
     + "itself where it counts. Not editable.</p>",
+
+  cfgSoloAdd:
+    "<p><b>A solo gateway</b> is a DATUM gateway configured with no "
+    + "<span class=\"k\">pool_host</span>. It joins the rotation like any "
+    + "pool, and the time it gets is spent mining solo from your own node.</p>"
+    + "<p>One is supported. Weighting how much time it gets is not available "
+    + "yet; every slot gets an even share.</p>",
 };
 
 var helpPop = document.createElement("div");

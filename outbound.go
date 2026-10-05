@@ -44,7 +44,7 @@ func (co *coordinator) outbound() []outboundConn {
 			u := co.ups[i][j]
 			c := outboundConn{
 				Addr:    pool.stratumAddr(),
-				Pool:    pool.Name,
+				Pool:    pool.displayName(),
 				Rig:     co.rigLabel(i),
 				Purpose: "stratum session to this gateway",
 			}

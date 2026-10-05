@@ -16,3 +16,8 @@ dist/
 
 # Coverage profiles.
 *.out
+
+# Scratch from the superpowers workflow: brainstorming mockups and plan
+# execution ledgers. Local working state, never part of the project.
+.superpowers/
+docs/superpowers/

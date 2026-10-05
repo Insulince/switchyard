@@ -170,3 +170,14 @@ func closedPort(t *testing.T) int {
 	_ = ln.Close()
 	return port
 }
+
+// A solo gateway is a DATUM gateway building from the operator's own node --
+// the gate's whole point. It passes.
+func TestVerifyDatumPassesASoloGateway(t *testing.T) {
+	shortRecheck(t)
+	p := statusPage(t, "", fixed(http.StatusOK, soloGatewayPage))
+	p.Solo = true
+	if err := verifyDatum(context.Background(), []poolConfig{p}, func(string) {}); err != nil {
+		t.Fatalf("solo DATUM gateway refused: %v", err)
+	}
+}

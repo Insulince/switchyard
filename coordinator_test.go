@@ -393,3 +393,54 @@ func TestResetStatsClearsRotationCostWithTheClock(t *testing.T) {
 		}{d.Reconnects, d.ReconnectMeanSeconds, d.ReconnectWorstSeconds, d.RotationCostPct})
 	}
 }
+
+// After a restart every gateway session and every miner come up at once, and
+// a miner can subscribe a moment before its SCHEDULED gateway is ready. It is
+// bound to a fallback for that instant -- and must not stay there until the
+// next block, sharing a pool with another rig. When the scheduled gateway
+// comes up, a rig on a fallback is sent to it, and only such a rig.
+func TestRigOnFallbackMovesWhenItsScheduledGatewayIsReady(t *testing.T) {
+	cfg := config{
+		Pools: []poolConfig{
+			{Name: "a", Host: "127.0.0.1", Port: 1, StatusPort: 2},
+			{Name: "b", Host: "127.0.0.1", Port: 3, StatusPort: 4},
+		},
+		Rigs: []rigConfig{{Listen: "0.0.0.0:23401"}},
+	}
+	cfg.applyDefaults()
+	co := newCoordinator(cfg)
+	co.base[0] = 1 // scheduled on "b" at step 0
+
+	onFallback, _ := pipeSession(t, co, "w")
+	onFallback.up = co.ups[0][0]
+	co.setSession(0, onFallback)
+
+	// A gateway that is not this rig's scheduled one coming up changes nothing.
+	co.gatewayReady(0, 0)
+	select {
+	case <-onFallback.done:
+		t.Fatal("rig moved when a gateway it is not scheduled on came up")
+	default:
+	}
+
+	co.gatewayReady(0, 1)
+	select {
+	case <-onFallback.done:
+	case <-time.After(time.Second):
+		t.Fatal("rig on a fallback was not sent to its scheduled gateway")
+	}
+	if !onFallback.rotated {
+		t.Error("the move was not attributed to switchyard, so its gap would read as a miner fault")
+	}
+
+	// A rig already on its scheduled gateway is left alone.
+	onTime, _ := pipeSession(t, co, "w2")
+	onTime.up = co.ups[0][1]
+	co.setSession(0, onTime)
+	co.gatewayReady(0, 1)
+	select {
+	case <-onTime.done:
+		t.Fatal("closed a rig that was already on its scheduled gateway")
+	default:
+	}
+}

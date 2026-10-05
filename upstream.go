@@ -34,7 +34,15 @@ const upstreamIdleTimeout = 5 * time.Minute
 type pendingSubmit struct {
 	sess   *rigSession
 	downID json.RawMessage
+	// diff is what this share is worth if accepted: the difficulty of the
+	// job it was mined on. See jobDiff.
+	diff uint64
 }
+
+// jobDiffMemory is how many recent jobs keep their difficulty. A share for a
+// job older than this is stale and would be rejected anyway; one that is
+// somehow accepted falls back to the current difficulty.
+const jobDiffMemory = 64
 
 // upstream is one persistent stratum session from switchyard to one gateway,
 // on behalf of one rig. There is a full mesh: every rig holds an open session
@@ -94,7 +102,17 @@ type upstream struct {
 	// pool". They are cumulative since process start and deliberately not
 	// persisted -- a restart reshuffles the placement anyway, so carrying old
 	// totals across one would describe an arrangement that no longer exists.
-	diff      uint64
+	diff uint64
+	// jobDiff is the difficulty in force when each recent job was sent.
+	//
+	// A share is worth its JOB's difficulty, not the latest set_difficulty:
+	// a new difficulty applies to jobs sent after it, and work already in
+	// flight was done at the old one. DATUM credits shares exactly this way
+	// (stratum_job_diffs). Crediting at the latest value instead turned a
+	// solo gateway's vardiff ramp -- it starts a rig at 1 and reached 268M
+	// within a minute -- into 4.3 million TH/s from a single rig.
+	jobDiff   map[string]uint64
+	jobOrder  []string
 	submitted uint64
 	accepted  uint64
 	rejected  uint64
@@ -152,6 +170,7 @@ func newUpstream(co *coordinator, rigIdx, poolIdx int, rig rigConfig, pool poolC
 		poolIdx:  poolIdx,
 		co:       co,
 		pending:  map[uint64]pendingSubmit{},
+		jobDiff:  map[string]uint64{},
 		sessions: map[*rigSession]int{},
 	}
 }
@@ -195,7 +214,7 @@ func (u *upstream) dropForReauth() {
 }
 
 func (u *upstream) logf(format string, args ...any) {
-	log.Printf("[%s->%s] "+format, append([]any{u.co.rigLabel(u.rigIdx), u.pool.Name}, args...)...)
+	log.Printf("[%s->%s] "+format, append([]any{u.co.rigLabel(u.rigIdx), u.pool.displayName()}, args...)...)
 }
 
 // run keeps one gateway session alive forever, reconnecting with backoff.
@@ -258,6 +277,8 @@ func (u *upstream) session(ctx context.Context) error {
 	u.connectedAt = time.Now()
 	u.ready = false
 	u.lastNotify, u.lastDiff = nil, nil
+	// Job ids belong to the connection that issued them.
+	u.jobDiff, u.jobOrder = map[string]uint64{}, nil
 	u.mu.Unlock()
 
 	defer func() {
@@ -288,6 +309,11 @@ func (u *upstream) session(ctx context.Context) error {
 	en1 := u.extranonce1
 	u.mu.Unlock()
 	u.logf("ready as %s (extranonce1=%s)", u.user, en1)
+	// A rig that bound to a fallback while this session was still coming up
+	// belongs here; see gatewayReady.
+	if u.co != nil {
+		u.co.gatewayReady(u.rigIdx, u.poolIdx)
+	}
 
 	return u.readLoop(sc, conn)
 }
@@ -445,6 +471,9 @@ func (u *upstream) handleNotification(m *message, line []byte) {
 			u.co.noteBlock(ph)
 		}
 		u.mu.Lock()
+		if job, ok := paramStringAt(m.Params, 0); ok {
+			u.noteJobLocked(job)
+		}
 		// Copied again rather than trusted: this is retained until the next
 		// job arrives, and every caller getting the ownership right is a
 		// weaker guarantee than not needing them to.
@@ -538,8 +567,8 @@ func (u *upstream) routeResponse(m *message) {
 		if string(m.Result) == "true" {
 			accepted = true
 			u.accepted++
-			u.acceptedWork += u.diff
-			u.addRecentLocked(time.Now(), u.diff)
+			u.acceptedWork += p.diff
+			u.addRecentLocked(time.Now(), p.diff)
 		} else {
 			u.rejected++
 		}
@@ -566,6 +595,19 @@ func (u *upstream) routeResponse(m *message) {
 	p.sess.send([]byte(fmt.Sprintf(`{"id":%s,"result":%s,"error":%s}`, rawID(p.downID), res, errField)))
 }
 
+// noteJobLocked records the difficulty a job was sent at, keeping the most
+// recent jobDiffMemory. Caller holds u.mu.
+func (u *upstream) noteJobLocked(job string) {
+	if _, seen := u.jobDiff[job]; !seen {
+		u.jobOrder = append(u.jobOrder, job)
+		if len(u.jobOrder) > jobDiffMemory {
+			delete(u.jobDiff, u.jobOrder[0])
+			u.jobOrder = u.jobOrder[1:]
+		}
+	}
+	u.jobDiff[job] = u.diff
+}
+
 // submit forwards a rig's share to this gateway under our own id, rewriting
 // the worker name to the one our session authorised with.
 func (u *upstream) submit(sess *rigSession, downID json.RawMessage, params json.RawMessage) error {
@@ -576,7 +618,7 @@ func (u *upstream) submit(sess *rigSession, downID json.RawMessage, params json.
 	u.mu.Lock()
 	if !u.ready || u.w == nil {
 		u.mu.Unlock()
-		return fmt.Errorf("gateway %s not ready", u.pool.Name)
+		return fmt.Errorf("gateway %s not ready", u.pool.displayName())
 	}
 	// Put the prefix back. The miner rolled its 7 bytes; the gateway
 	// expects the 8 it handed out, and the leading byte is the one that
@@ -592,7 +634,12 @@ func (u *upstream) submit(sess *rigSession, downID json.RawMessage, params json.
 	u.nextID++
 	u.submitted++
 	id := u.nextID + 100 // stay clear of the handshake ids
-	u.pending[id] = pendingSubmit{sess: sess, downID: downID}
+	jobID, _ := paramStringAt(params, 1)
+	worth, known := u.jobDiff[jobID]
+	if !known {
+		worth = u.diff
+	}
+	u.pending[id] = pendingSubmit{sess: sess, downID: downID, diff: worth}
 	w := u.w
 	u.mu.Unlock()
 
@@ -685,7 +732,7 @@ func (u *upstream) primeSession(sess *rigSession) {
 		sess.send(diff)
 		sess.logf("primed with %s", truncate(diff, 120))
 	} else {
-		sess.logf("WARNING: gateway %s never announced a difficulty; rig will default to 1", u.pool.Name)
+		sess.logf("WARNING: gateway %s never announced a difficulty; rig will default to 1", u.pool.displayName())
 	}
 	if notify != nil {
 		sess.send(notify)

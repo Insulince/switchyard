@@ -42,6 +42,21 @@ type poolConfig struct {
 	// because a gateway in non-pooled mode prints its own local tag in that
 	// field, and a pool once spent hours renamed to its operator.
 	Name string `json:"name,omitempty"`
+
+	// Solo marks the one entry whose gateway is deliberately configured with
+	// no pool: the time rotation gives it is spent mining solo, from the
+	// operator's own node. See the README's "Solo slot".
+	//
+	// The flag ALONE says so. A solo entry has no pool and therefore no
+	// Name, and nothing invents one for it: overloading Name with a marker
+	// would take that string away from any real pool that happened to use
+	// it. Code that needs a label calls displayName.
+	//
+	// At most one entry may carry it. That is the supported way to mine solo
+	// alongside pools, not an enforcement mechanism: an operator who adds
+	// further unmarked solo gateways is not stopped, those just get the
+	// ordinary "this gateway has no pool" warning.
+	Solo bool `json:"solo,omitempty"`
 }
 
 // stratumAddr is the endpoint switchyard actually opens a socket to.
@@ -321,6 +336,7 @@ func (c *config) validate() error {
 	// duplicate listen addresses are, and they fail confusingly at runtime.
 	seenPool := map[string]bool{}
 	seenStratum := map[string]bool{}
+	solos := 0
 	for i, p := range c.Pools {
 		if p.Port <= 0 || p.Port > 65535 {
 			return fmt.Errorf("pool %d: a gateway stratum port is required", i)
@@ -336,14 +352,31 @@ func (c *config) validate() error {
 			return fmt.Errorf("pool %d (%s): stratum and status ports are both %d; they are "+
 				"different services on the gateway", i, p.displayName(), p.Port)
 		}
-		if seenPool[p.Name] && p.Name != "" {
-			return fmt.Errorf("duplicate pool name %q", p.Name)
+		if p.Solo {
+			solos++
+			if p.Name != "" {
+				return fmt.Errorf("pool %d is the solo gateway, which has no pool to name; "+
+					"remove its name (%q)", i, p.Name)
+			}
 		}
+		// The address first: two entries on one gateway is a mistake about
+		// the address, and an unnamed entry's label IS its address, so
+		// checking labels first reported it as a "duplicate pool name" the
+		// operator never typed.
 		if seenStratum[p.stratumAddr()] {
 			return fmt.Errorf("two pools share the gateway address %q", p.stratumAddr())
 		}
-		seenPool[p.Name] = true
+		// On the label, not the raw name: the label is what everything keys
+		// on, and unnamed entries have one too.
+		label := p.displayName()
+		if seenPool[label] {
+			return fmt.Errorf("duplicate pool name %q", label)
+		}
+		seenPool[label] = true
 		seenStratum[p.stratumAddr()] = true
+	}
+	if solos > 1 {
+		return fmt.Errorf("only one pool can be solo (%d are marked solo)", solos)
 	}
 	seenListen := map[string]bool{}
 	for i, r := range c.Rigs {
@@ -515,9 +548,17 @@ func (c *config) validateRaw() error {
 	return nil
 }
 
-// displayName is the operator's label, falling back to the address so a pool
-// is never nameless.
+// displayName is how an entry is told apart -- in logs, in the gateway health
+// map, and in the pool names /status joins rigs to pools by. Derived, never
+// stored: the operator's label, the solo entry's role and address, or the
+// address alone, so an entry is never nameless and never needs a sentinel.
+//
+// Every such site calls this rather than reading Name. Reading Name directly
+// is how unnamed entries once logged blanks and shared one health record.
 func (p poolConfig) displayName() string {
+	if p.Solo {
+		return "solo (" + p.stratumAddr() + ")"
+	}
 	if p.Name != "" {
 		return p.Name
 	}

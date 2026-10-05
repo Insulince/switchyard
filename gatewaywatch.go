@@ -44,6 +44,14 @@ type gatewayHealth struct {
 	// rotation onto that pool was a rotation onto solo, the pool-side
 	// accepted counter froze, and the card stayed green.
 	Unpooled bool `json:"unpooled,omitempty"`
+	// NetworkDifficulty is the current block's difficulty, from the job
+	// section of the page. DATUM prints it pooled or not; the solo card turns
+	// it into odds of finding a block.
+	NetworkDifficulty float64 `json:"networkDifficulty,omitempty"`
+	// SoloMismatch is an entry marked solo whose gateway names a pool. Its
+	// work is going to that pool, so the dashboard's "solo" would be wrong.
+	// Warn-only: nothing is refused for it.
+	SoloMismatch bool `json:"soloMismatch,omitempty"`
 }
 
 // The one status DATUM prints when it is actually talking to its Prime.
@@ -55,6 +63,24 @@ const gatewayPooledStatus = "Connected and Ready"
 
 func (h gatewayHealth) unpooled() bool {
 	return h.Status != "" && h.Status != gatewayPooledStatus
+}
+
+// What DATUM prints for the pool host of a gateway configured with no pool
+// (datum_api.c). A pooled gateway that has lost its Prime still prints its
+// host, so this is "solo by configuration", never "pool down".
+const gatewayNoPoolHost = "N/A"
+
+// applyRole reads the page in the light of what the config says the entry
+// is. The solo entry having no pool is the point, so it is not unpooled; it
+// is a mismatch only if its gateway turns out to name a pool after all.
+func (h *gatewayHealth) applyRole(solo bool) {
+	if solo {
+		h.Unpooled = false
+		h.SoloMismatch = h.PoolHost != "" && h.PoolHost != gatewayNoPoolHost
+		return
+	}
+	h.Unpooled = h.unpooled()
+	h.SoloMismatch = false
 }
 
 // rejecting reports the case worth shouting about: the pool is refusing work
@@ -119,25 +145,31 @@ func (co *coordinator) watchGateways(ctx context.Context) {
 				return
 			}
 			if err != nil {
-				prev, _ := co.gw.get(pool.Name)
+				prev, _ := co.gw.get(pool.displayName())
 				prev.Err = err.Error()
 				prev.Checked = time.Now()
-				co.gw.set(pool.Name, prev)
+				co.gw.set(pool.displayName(), prev)
 				continue
 			}
-			was, _ := co.gw.get(pool.Name)
-			co.gw.set(pool.Name, *info)
+			info.applyRole(pool.Solo)
+			was, _ := co.gw.get(pool.displayName())
+			co.gw.set(pool.displayName(), *info)
 			// Log the transition, not the state: an operator who has this
 			// dashboard closed should still find it in the journal.
 			if info.Unpooled && !was.Unpooled {
 				log.Printf("WARNING: gateway %s reports %q -- it has no pool and is solo mining "+
 					"under its own tag. Rotations onto it are not reaching %s.",
-					pool.Name, info.Status, pool.displayName())
+					pool.stratumAddr(), info.Status, pool.displayName())
+			}
+			if info.SoloMismatch && !was.SoloMismatch {
+				log.Printf("WARNING: %s is marked solo, but its gateway mines to %s -- "+
+					"its work is going to that pool, not solo.",
+					pool.displayName(), info.PoolHost)
 			}
 			if info.rejecting() && !was.rejecting() {
-				log.Printf("WARNING: pool behind %s is rejecting the work this gateway accepts "+
+				log.Printf("WARNING: pool %s (behind gateway %s) is rejecting the work this gateway accepts "+
 					"(%d rejected vs %d accepted upstream). Check pool_pass_full_users on that gateway.",
-					pool.Name, info.PoolRejected, info.PoolAccepted)
+					pool.displayName(), pool.stratumAddr(), info.PoolRejected, info.PoolAccepted)
 			}
 		}
 	}
@@ -158,6 +190,7 @@ func (co *coordinator) watchGateways(ctx context.Context) {
 var (
 	poolAccRE = regexp.MustCompile(`Pool Shares Accepted:\s*(\d+)`)
 	poolRejRE = regexp.MustCompile(`Pool Shares Rejected:\s*(\d+)`)
+	netDiffRE = regexp.MustCompile(`Block Difficulty:\s*([0-9]+(?:\.[0-9]+)?)`)
 )
 
 // inspectGatewayFull is inspectGateway plus the share counters. Split so the
@@ -168,12 +201,13 @@ func inspectGatewayFull(ctx context.Context, rawURL string) (*gatewayHealth, err
 		return nil, err
 	}
 	h := &gatewayHealth{
-		PoolHost:     info.PoolHost,
-		Status:       info.Status,
-		Tag:          info.Tag,
-		PoolAccepted: firstUint(poolAccRE, text),
-		PoolRejected: firstUint(poolRejRE, text),
-		Checked:      time.Now(),
+		PoolHost:          info.PoolHost,
+		Status:            info.Status,
+		Tag:               info.Tag,
+		PoolAccepted:      firstUint(poolAccRE, text),
+		PoolRejected:      firstUint(poolRejRE, text),
+		NetworkDifficulty: firstFloat(netDiffRE, text),
+		Checked:           time.Now(),
 	}
 	h.Unpooled = h.unpooled()
 	return h, nil
@@ -183,6 +217,15 @@ func firstUint(re *regexp.Regexp, text string) uint64 {
 	if m := re.FindStringSubmatch(text); len(m) > 1 {
 		if n, err := strconv.ParseUint(m[1], 10, 64); err == nil {
 			return n
+		}
+	}
+	return 0
+}
+
+func firstFloat(re *regexp.Regexp, text string) float64 {
+	if m := re.FindStringSubmatch(text); len(m) > 1 {
+		if f, err := strconv.ParseFloat(m[1], 64); err == nil {
+			return f
 		}
 	}
 	return 0

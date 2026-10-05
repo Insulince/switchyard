@@ -2,15 +2,20 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // applyDefaults treats "0 or less" as "not set", which is right for an omitted
@@ -362,4 +367,162 @@ func TestSaveRefusesAnUnbindableDashboardAddress(t *testing.T) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("a rejected config must not reach disk")
 	}
+}
+
+// A gateway configured with no pool, as DATUM prints it (datum_api.c):
+// "Non-Pooled Mode" and a pool host of "N/A". The job section, with the
+// network difficulty, is printed either way.
+const soloGatewayPage = `<html><head><title>DATUM Gateway Status</title></head><body>
+  <tr><td>Pool Shares Accepted:</td><td>0 (0 diff)</td></tr>
+  <tr><td>Pool Shares Rejected:</td><td>0 (0 diff)</td></tr>
+  <tr><td>Status:</td><td><svg viewBox='0 0 100 100'><circle style='fill:lime' /></svg> Non-Pooled Mode</td></tr>
+  <tr><td>Pool Host:</td><td>N/A</td></tr>
+  <tr><td>Pool Tag:</td><td>"d8dd1618"</td></tr>
+  <tr><td>Block Height:</td><td>975730</td></tr>
+  <tr><td>Block Difficulty:</td><td>4625039957.661</td></tr>
+</body></html>`
+
+func inspectPage(t *testing.T, page string) *gatewayHealth {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(page))
+	}))
+	defer srv.Close()
+	h, err := inspectGatewayFull(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("inspect: %v", err)
+	}
+	return h
+}
+
+// The solo entry's "no pool" is the point, not an outage. The same page on an
+// UNMARKED entry keeps today's warning: that is the off-path workaround, and
+// it is flagged, not stopped.
+func TestSoloRoleSilencesTheUnpooledWarning(t *testing.T) {
+	h := inspectPage(t, soloGatewayPage)
+	if h.NetworkDifficulty != 4625039957.661 {
+		t.Errorf("NetworkDifficulty = %v, want 4625039957.661", h.NetworkDifficulty)
+	}
+
+	solo := *h
+	solo.applyRole(true)
+	if solo.Unpooled || solo.SoloMismatch {
+		t.Errorf("solo entry on a no-pool gateway: unpooled=%v mismatch=%v, want neither", solo.Unpooled, solo.SoloMismatch)
+	}
+
+	unmarked := *h
+	unmarked.applyRole(false)
+	if !unmarked.Unpooled {
+		t.Error("unmarked no-pool gateway lost its unpooled warning")
+	}
+}
+
+// Marked solo but pointed at a pool: the dashboard would call pool work solo.
+// Warn-only -- flagged, never refused.
+func TestSoloMarkedButPooledIsAMismatch(t *testing.T) {
+	h := inspectPage(t, `<html><head><title>DATUM Gateway Status</title></head><body>
+	  <tr><td>Status:</td><td>Connected and Ready</td></tr>
+	  <tr><td>Pool Host:</td><td>tides.example.ca:28916</td></tr>
+	</body></html>`)
+	h.applyRole(true)
+	if !h.SoloMismatch {
+		t.Error("solo entry on a pooled gateway was not flagged")
+	}
+	if h.Unpooled {
+		t.Error("solo entry flagged unpooled; the mismatch is the only warning that applies")
+	}
+}
+
+// /status carries the role, and the page's literal "N/A" never becomes the
+// pool's host.
+func TestStatusMarksTheSoloPool(t *testing.T) {
+	cfg := config{
+		Pools: []poolConfig{
+			// A real pool called "Solo", next to the solo entry: no name is
+			// reserved, and the two must stay distinct.
+			{Name: "Solo", Host: "127.0.0.1", Port: 23336, StatusPort: 7154},
+			{Solo: true, Host: "127.0.0.1", Port: 23339, StatusPort: 7157},
+		},
+		Rigs: []rigConfig{{Listen: "0.0.0.0:23401"}},
+	}
+	cfg.applyDefaults()
+	co := newCoordinator(cfg)
+	h := inspectPage(t, soloGatewayPage)
+	h.applyRole(true)
+	co.gw.set(cfg.Pools[1].displayName(), *h)
+
+	doc := co.status()
+	if doc.Pools[0].Solo || !doc.Pools[1].Solo {
+		t.Errorf("solo flags = %v,%v, want false,true", doc.Pools[0].Solo, doc.Pools[1].Solo)
+	}
+	if doc.Pools[0].Name == doc.Pools[1].Name {
+		t.Errorf("the pool named Solo and the solo entry share the name %q", doc.Pools[0].Name)
+	}
+	if doc.Pools[0].Health != nil {
+		t.Error("the solo entry's health landed on the pool named Solo")
+	}
+	if doc.Pools[1].Host == gatewayNoPoolHost {
+		t.Errorf("solo pool host is the page's literal %q", gatewayNoPoolHost)
+	}
+	if doc.Pools[1].Health == nil || doc.Pools[1].Health.NetworkDifficulty == 0 {
+		t.Error("solo pool health is missing the network difficulty")
+	}
+}
+
+// The rejecting warning is the journal's record of the costliest trap there
+// is (pool_pass_full_users), so it must say WHICH pool. Gateways usually all
+// sit on 127.0.0.1, so a host alone names none of them.
+func TestRejectingWarningNamesThePool(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`<html><head><title>DATUM Gateway Status</title></head><body>
+		  <tr><td>Pool Shares Accepted:</td><td>0 (0 diff)</td></tr>
+		  <tr><td>Pool Shares Rejected:</td><td>9 (9216 diff)</td></tr>
+		  <tr><td>Status:</td><td>Connected and Ready</td></tr>
+		  <tr><td>Pool Host:</td><td>pool.example.tech:28915</td></tr>
+		</body></html>`))
+	}))
+	defer srv.Close()
+	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	sp, _ := strconv.Atoi(port)
+
+	var buf syncBuffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	co := newCoordinator(config{
+		Pools:              []poolConfig{{Name: "RIPTIDE", Host: host, Port: 23336, StatusPort: sp}},
+		GatewayPollSeconds: 5,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go co.watchGateways(ctx)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(buf.String(), "is rejecting") {
+		if time.Now().After(deadline) {
+			t.Fatalf("no rejecting warning logged; log was:\n%s", buf.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if line := buf.String(); !strings.Contains(line, "RIPTIDE") {
+		t.Errorf("rejecting warning does not name the pool:\n%s", line)
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe to share between the logger and a test.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

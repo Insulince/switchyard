@@ -293,6 +293,39 @@ Run a node.
 
 ---
 
+## Solo slot
+
+One gateway in the rotation can be a **solo** one: a DATUM gateway configured
+with no pool. It takes its turn like any pool. While a rig is on it, that rig
+is mining solo from your own node, and a block it finds is yours whole.
+
+The gateway's own config needs three things a pooled one does not:
+
+| Setting | Value | Why |
+|---|---|---|
+| `datum.pool_host` | `""` | No pool. Its status page then shows `Pool Host: N/A`, which is how switchyard confirms the gateway is solo. |
+| `datum.pooled_mining_only` | `false` | With it true, a gateway with no pool refuses to work at all: its page says `Not Ready` and no rig on it mines. |
+| `stratum.vardiff_min` | e.g. `4096` | A pooled gateway starts rigs at the pool's minimum difficulty, so this setting rarely matters there. A solo gateway has no pool minimum, so it starts every rig **here**. Left at `1`, a large rig floods it with shares and DATUM ramps the difficulty by orders of magnitude within a minute. Start it near where your pooled gateways settle. |
+
+`mining.pool_address` is where a found block pays, so set it to your own
+address. Give it its own coinbase tag, as with any gateway.
+
+Add it with **Add solo gateway** in CONFIGURE, or in `config.json`:
+
+    { "solo": true, "host": "gw-solo", "port": 23339, "statusPort": 7157 }
+
+It has no name, because there is no pool to name. The dashboard draws it as
+**Solo → network** and shows your odds of a block at the hashrate it has
+averaged, using the network difficulty from the gateway's own page.
+
+**One solo slot is supported.** Every slot gets an even share of time;
+weighting that is not available yet. If this solo gateway turns out to be
+pointed at a pool, or conversely if a pooled gateway turns out to be mining
+solo, the corresponding cards simply say so with a warning, and mining continues
+anyway as configured, uninterrupted.
+
+---
+
 ## Running it
 
 A single static binary, no dependencies.

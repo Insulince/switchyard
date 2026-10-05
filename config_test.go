@@ -286,3 +286,103 @@ func TestUnknownConfigKeysAreRejected(t *testing.T) {
 		t.Fatalf("the error should name the offending key, got: %v", err)
 	}
 }
+
+// The flag alone marks the solo entry. It has no pool, so it has no name, and
+// a file that gives it one is wrong rather than quietly reinterpreted.
+func TestSoloEntryHasNoName(t *testing.T) {
+	c := config{Pools: []poolConfig{
+		{Solo: true, Name: "RIPTIDE-old", Host: "gw-solo", Port: 23339, StatusPort: 7157},
+	}}
+	c.applyDefaults()
+	err := c.validate()
+	if err == nil || !strings.Contains(err.Error(), "has no pool to name") {
+		t.Fatalf("err = %v, want the no-name error", err)
+	}
+
+	c.Pools[0].Name = ""
+	if err := c.validate(); err != nil {
+		t.Fatalf("unnamed solo entry rejected: %v", err)
+	}
+	if got, want := c.Pools[0].displayName(), "solo (gw-solo:23339)"; got != want {
+		t.Errorf("displayName = %q, want %q", got, want)
+	}
+}
+
+// One solo slot is the supported path. A second marked entry is a config
+// mistake, caught on load and on save alike.
+func TestOnlyOneEntryMayBeSolo(t *testing.T) {
+	c := config{Pools: []poolConfig{
+		{Solo: true, Host: "gw-s1", Port: 23339, StatusPort: 7157},
+		{Solo: true, Host: "gw-s2", Port: 23340, StatusPort: 7158},
+	}}
+	c.applyDefaults()
+	err := c.validate()
+	if err == nil || !strings.Contains(err.Error(), "only one pool can be solo") {
+		t.Fatalf("err = %v, want the one-solo rule", err)
+	}
+}
+
+// No name is taken for switchyard's own purposes: a real pool may be called
+// "Solo", next to the solo entry, and the two stay distinct.
+func TestAPoolMayBeNamedSolo(t *testing.T) {
+	c := config{Pools: []poolConfig{
+		{Name: "Solo", Host: "gw-a", Port: 23336, StatusPort: 7154},
+		{Solo: true, Host: "gw-solo", Port: 23339, StatusPort: 7157},
+	}}
+	c.applyDefaults()
+	if err := c.validate(); err != nil {
+		t.Fatalf("a pool named Solo was rejected: %v", err)
+	}
+	if c.Pools[0].displayName() == c.Pools[1].displayName() {
+		t.Errorf("both entries labelled %q", c.Pools[0].displayName())
+	}
+}
+
+// Labels are what logs, health and /status key on, so they must be unique --
+// including for unnamed entries, which the old name check skipped.
+func TestLabelsMustBeUnique(t *testing.T) {
+	c := config{Pools: []poolConfig{
+		{Name: "gw-b:23337", Host: "gw-a", Port: 23336, StatusPort: 7154},
+		{Host: "gw-b", Port: 23337, StatusPort: 7155},
+	}}
+	c.applyDefaults()
+	err := c.validate()
+	if err == nil || !strings.Contains(err.Error(), "duplicate pool name") {
+		t.Fatalf("err = %v, want a duplicate-label error", err)
+	}
+}
+
+func TestSoloSurvivesSaveAndLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	c := config{Pools: []poolConfig{{Solo: true, Host: "gw-solo", Port: 23339, StatusPort: 7157}}}
+	c.applyDefaults()
+	if err := saveConfig(path, c); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if strings.Contains(string(raw), `"name"`) {
+		t.Errorf("a name was written for the solo entry:\n%s", raw)
+	}
+	got, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Pools[0].Solo || got.Pools[0].Name != "" {
+		t.Errorf("after round trip: %+v, want solo with no name", got.Pools[0])
+	}
+}
+
+// Two entries on one gateway address is a mistake about the ADDRESS, and the
+// error must say so -- not report a "duplicate pool name" for entries the
+// operator never named.
+func TestSharedAddressIsReportedAsSuch(t *testing.T) {
+	c := config{Pools: []poolConfig{
+		{Host: "127.0.0.1", Port: 23336, StatusPort: 7154},
+		{Host: "127.0.0.1", Port: 23336, StatusPort: 7155},
+	}}
+	c.applyDefaults()
+	err := c.validate()
+	if err == nil || !strings.Contains(err.Error(), "share the gateway address") {
+		t.Fatalf("err = %v, want the shared-address error", err)
+	}
+}

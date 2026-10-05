@@ -226,13 +226,13 @@ func (s *rigSession) run() {
 				}
 				e1, e2, _, ok := chosen.attach(s)
 				if !ok {
-					s.logf("gateway %s went away during bind; dropping connection", chosen.pool.Name)
+					s.logf("gateway %s went away during bind; dropping connection", chosen.pool.displayName())
 					return
 				}
 				up, en1, en2, attached = chosen, e1, e2, true
 				s.up = chosen
 				s.co.setSession(s.rigIdx, s)
-				s.logf("bound to %s (extranonce1=%s)", chosen.pool.Name, en1)
+				s.logf("bound to %s (extranonce1=%s)", chosen.pool.displayName(), en1)
 				// Real miner: the pre-subscribe guard has done its job.
 				_ = s.conn.SetReadDeadline(time.Time{})
 			}
@@ -300,7 +300,7 @@ func (s *rigSession) run() {
 				break
 			}
 			if err := up.submit(s, m.ID, m.Params); err != nil {
-				s.logf("submit to %s failed: %v", up.pool.Name, err)
+				s.logf("submit to %s failed: %v", up.pool.displayName(), err)
 				s.send([]byte(fmt.Sprintf(
 					`{"id":%s,"result":null,"error":[20,"upstream unavailable",null]}`, rawID(m.ID))))
 			}

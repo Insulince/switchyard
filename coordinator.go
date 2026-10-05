@@ -225,11 +225,53 @@ func (co *coordinator) upstreamForRig(rigIdx int) (*upstream, bool) {
 	for j := range co.ups[rigIdx] {
 		if u := co.ups[rigIdx][j]; u.isReady() {
 			log.Printf("[%s] scheduled pool %s unavailable; falling back to %s",
-				co.rigLabel(rigIdx), co.cfg.Pools[want].Name, u.pool.Name)
+				co.rigLabel(rigIdx), co.cfg.Pools[want].displayName(), u.pool.displayName())
 			return u, true
 		}
 	}
 	return nil, false
+}
+
+// gatewayReady is told by an upstream the moment its session becomes usable.
+//
+// After a restart every gateway session and every miner come up at once, and
+// a miner can subscribe a moment before its SCHEDULED gateway is ready.
+// upstreamForRig then binds it to whichever gateway is -- right for that
+// instant and wrong from the next, because nothing else ever moves it back:
+// until the next block it shares a pool with another rig, and its own pool
+// gets nothing. So when a rig's scheduled gateway comes up, any of its miners
+// on a fallback are sent over. One reconnect for that rig alone, instead of a
+// doubled pool for up to a block. A gateway recovering mid-run is the same
+// case.
+//
+// Marked rotated, like a rotation's victims: switchyard caused this
+// reconnect, so its gap is a cost of scheduling, not a miner fault.
+func (co *coordinator) gatewayReady(rigIdx, poolIdx int) {
+	co.mu.Lock()
+	if co.activePoolIdx(rigIdx) != poolIdx {
+		co.mu.Unlock()
+		return
+	}
+	want := co.ups[rigIdx][poolIdx]
+	var strays []*rigSession
+	for _, s := range co.sessions[rigIdx] {
+		if s.up != nil && s.up != want {
+			s.rotated = true
+			strays = append(strays, s)
+		}
+	}
+	co.mu.Unlock()
+
+	if len(strays) == 0 {
+		return
+	}
+	log.Printf("[%s] scheduled gateway %s is ready; moving off its fallback",
+		co.rigLabel(rigIdx), co.cfg.Pools[poolIdx].displayName())
+	// Outside the lock, as in rotate: each session calls back into
+	// clearSession as it unwinds.
+	for _, s := range strays {
+		s.close()
+	}
 }
 
 // noteBlock is called for every mining.notify seen on every upstream. All
@@ -383,8 +425,8 @@ func (co *coordinator) resetStats() {
 func (co *coordinator) assignmentTableLocked(prevStep int, showFrom bool) string {
 	width := 0
 	for _, p := range co.cfg.Pools {
-		if len(p.Name) > width {
-			width = len(p.Name)
+		if len(p.displayName()) > width {
+			width = len(p.displayName())
 		}
 	}
 
@@ -399,7 +441,7 @@ func (co *coordinator) assignmentTableLocked(prevStep int, showFrom bool) string
 
 	var b strings.Builder
 	for j, pool := range co.cfg.Pools {
-		fmt.Fprintf(&b, "\n  %-*s  ", width, pool.Name)
+		fmt.Fprintf(&b, "\n  %-*s  ", width, pool.displayName())
 		here := occupants[j]
 		if len(here) == 0 {
 			b.WriteString("(idle)")
@@ -411,7 +453,7 @@ func (co *coordinator) assignmentTableLocked(prevStep int, showFrom bool) string
 			}
 			b.WriteString(co.rigLabel(i))
 			if showFrom {
-				from := co.cfg.Pools[(co.base[i]+prevStep)%len(co.cfg.Pools)].Name
+				from := co.cfg.Pools[(co.base[i]+prevStep)%len(co.cfg.Pools)].displayName()
 				fmt.Fprintf(&b, " (from %s)", from)
 			}
 		}
@@ -596,6 +638,10 @@ type poolStatus struct {
 	Gateway string `json:"gateway"`
 	Addr    string `json:"addr"`
 	Host    string `json:"host,omitempty"`
+
+	// Solo is the config's mark: this entry is the solo slot, and the
+	// dashboard draws it as "Solo -> network" rather than as a pool.
+	Solo bool `json:"solo,omitempty"`
 
 	// Health is the gateway's own report of how the pool behind it is treating
 	// the work. Absent when no status page is configured.
@@ -813,6 +859,7 @@ func (co *coordinator) status() statusDoc {
 			Gateway:   pool.gatewayName(),
 			Addr:      pool.stratumAddr(),
 			Host:      pool.Host,
+			Solo:      pool.Solo,
 			Occupants: []string{},
 		}
 	}
@@ -941,12 +988,14 @@ func (co *coordinator) status() statusDoc {
 		}
 	}
 	for j, pool := range co.cfg.Pools {
-		if h, ok := co.gw.get(pool.Name); ok {
+		if h, ok := co.gw.get(pool.displayName()); ok {
 			hh := h
 			pools[j].Health = &hh
 			// A live reading beats a config label, and means the config does
 			// not have to carry one at all.
-			if hh.PoolHost != "" {
+			// Not for the solo entry: its page says "N/A", and that is not a
+			// host.
+			if hh.PoolHost != "" && !pool.Solo {
 				pools[j].Host = hh.PoolHost
 			}
 		}
