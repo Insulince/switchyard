@@ -42,6 +42,12 @@ type server struct {
 	// always a bind failure -- a port taken between the probe and the listen.
 	lastErr string
 
+	// The DATUM gate's two states for the current generation (datumgate.go):
+	// still waiting for a gateway to identify itself, or refused outright.
+	// Either way nothing is mining, and the page has to say why.
+	gateWaiting string
+	gateRefused string
+
 	srv  *http.Server
 	addr string
 
@@ -60,6 +66,13 @@ func newServer(path string) *server {
 func (s *server) swap(co *coordinator, cfg config) {
 	s.mu.Lock()
 	s.co, s.cfg, s.lastErr = co, cfg, ""
+	s.gateWaiting, s.gateRefused = "", ""
+	s.mu.Unlock()
+}
+
+func (s *server) setGate(waiting, refused string) {
+	s.mu.Lock()
+	s.gateWaiting, s.gateRefused = waiting, refused
 	s.mu.Unlock()
 }
 
@@ -218,6 +231,7 @@ func (s *server) routes() http.Handler {
 		doc := co.status()
 		s.mu.RLock()
 		doc.ReloadError = s.lastErr
+		doc.GateWaiting, doc.GateRefused = s.gateWaiting, s.gateRefused
 		s.mu.RUnlock()
 		writeJSON(w, http.StatusOK, doc)
 	})
@@ -643,54 +657,20 @@ func inspectGateway(ctx context.Context, rawURL string) (*gatewayInfo, error) {
 // text as well so callers that want more out of it -- the health poller wants
 // the share counters -- do not have to fetch it twice or reimplement the parse.
 func fetchGatewayStatus(ctx context.Context, rawURL string) (*gatewayInfo, string, error) {
-	rawURL = strings.TrimSpace(rawURL)
-	if rawURL == "" {
-		return nil, "", fmt.Errorf("no gateway API address given")
-	}
-	if !strings.Contains(rawURL, "://") {
-		rawURL = "http://" + rawURL
-	}
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return nil, "", fmt.Errorf("not a usable address: %w", err)
-	}
-	// Only ever plain HTTP(S) to a host and port. This takes an address from
-	// the browser and fetches it server-side, so it is worth being explicit
-	// that it will not be talked into reading a file.
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, "", fmt.Errorf("only http and https are supported, not %q", u.Scheme)
-	}
-	u.Path, u.RawQuery, u.Fragment = "/", "", ""
-
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	text, host, err := fetchGatewayPage(ctx, rawURL)
 	if err != nil {
 		return nil, "", err
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, "", fmt.Errorf("could not reach %s: %w", u.Host, err)
+	if !isDatumPage(text) {
+		return nil, "", fmt.Errorf("%s responded, but %w", host, errNotDatum)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("%s answered %s", u.Host, resp.Status)
-	}
-	// Bounded read: a status page that streams forever should not be able to
-	// exhaust memory here.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, "", err
-	}
-
-	text := stripTags(string(body))
 	info := &gatewayInfo{
 		PoolHost: firstGroup(poolHostRE, text),
 		Status:   firstGroup(statusRE, text),
 		Tag:      firstGroup(poolTagRE, text),
 	}
 	if info.PoolHost == "" {
-		return nil, "", fmt.Errorf("%s responded, but does not look like a DATUM gateway status page", u.Host)
+		return nil, "", fmt.Errorf("%s is a DATUM gateway, but its status page names no pool host", host)
 	}
 	// The status page prints host and port together; the port is the pool's
 	// stratum port, of no interest here and only clutter in a label.
@@ -698,6 +678,55 @@ func fetchGatewayStatus(ctx context.Context, rawURL string) (*gatewayInfo, strin
 		info.PoolHost = info.PoolHost[:i]
 	}
 	return info, text, nil
+}
+
+// fetchGatewayPage fetches a status page and flattens it to text, and says
+// nothing about what the page is. An error here means nothing usable answered
+// -- the transport failed or the server refused -- which is a different fact
+// from "something answered and it is not DATUM", and the DATUM gate treats the
+// two very differently. See datumgate.go.
+func fetchGatewayPage(ctx context.Context, rawURL string) (text, host string, err error) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return "", "", fmt.Errorf("no gateway API address given")
+	}
+	if !strings.Contains(rawURL, "://") {
+		rawURL = "http://" + rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", "", fmt.Errorf("not a usable address: %w", err)
+	}
+	// Only ever plain HTTP(S) to a host and port. This takes an address from
+	// the browser and fetches it server-side, so it is worth being explicit
+	// that it will not be talked into reading a file.
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", "", fmt.Errorf("only http and https are supported, not %q", u.Scheme)
+	}
+	u.Path, u.RawQuery, u.Fragment = "/", "", ""
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return "", "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("could not reach %s: %w", u.Host, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("%s answered %s", u.Host, resp.Status)
+	}
+	// Bounded read: a status page that streams forever should not be able to
+	// exhaust memory here.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", "", err
+	}
+
+	return stripTags(string(body)), u.Host, nil
 }
 
 // Targeted patterns rather than a general "value after a label" scan.

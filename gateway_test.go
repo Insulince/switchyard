@@ -111,7 +111,7 @@ func TestInspectGatewayRejectsUnrelatedPages(t *testing.T) {
 // the pool, 9 rejected by the pool -- with switchyard reporting 9 accepted and
 // 0 rejected throughout.
 func TestGatewayHealthReadsPoolSideCounters(t *testing.T) {
-	page := `<html><body>
+	page := `<html><head><title>DATUM Gateway Status</title></head><body>
 	  <tr><td>Local Shares Accepted:</td><td>9 (9216 diff)</td></tr>
 	  <tr><td>Local Shares Rejected:</td><td>0 (0 diff)</td></tr>
 	  <tr><td>Pool Shares Accepted:</td><td>0 (0 diff)</td></tr>
@@ -182,7 +182,7 @@ func TestGatewayHealthIgnoresSmallSamples(t *testing.T) {
 // operator. The state must be flagged, and nothing read from the page may
 // ever become the pool's name.
 func TestUnpooledGatewayIsFlaggedAndKeepsItsConfigName(t *testing.T) {
-	page := `<html><body>
+	page := `<html><head><title>DATUM Gateway Status</title></head><body>
 	  <tr><td>Pool Shares Accepted:</td><td>6165 (12625920 diff)</td></tr>
 	  <tr><td>Pool Shares Rejected:</td><td>92 (188416 diff)</td></tr>
 	  <tr><td>Status:</td><td><svg viewBox='0 0 100 100'><circle cx='50' cy='60' r='35' style='fill:yellow' /></svg> Non-Pooled Mode</td></tr>

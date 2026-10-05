@@ -66,6 +66,12 @@ These are not style preferences. Each one was found by losing shares.
   in `upstream.session`). `readLoop` blocks on the socket, not the context;
   without this a config reload leaves the old generation's gateway sessions
   alive and rotating a coordinator nothing is attached to.
+- **The DATUM gate is policy, and scorched earth on purpose** (`datumgate.go`).
+  Any configured upstream whose status page answers as something other than
+  a DATUM gateway stops *everything* until it is removed from the config. Do
+  not soften it into a warning, a per-pool exclusion or a flag. Do not let an
+  unanswered status port count as a pass: positive identification is the
+  requirement, or pointing the port at nothing gets around it.
 - **Config parsing rejects unknown keys.** A hand-edited file that silently
   ignores a typo is worse than one that refuses to start. Do not relax this.
 

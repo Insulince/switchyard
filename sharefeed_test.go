@@ -108,7 +108,7 @@ func TestPoolSharesReportedOnlyWhileWatched(t *testing.T) {
 	var accepted atomic.Uint64
 	accepted.Store(13000)
 	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = fmt.Fprintf(w, `<table>
+		_, _ = fmt.Fprintf(w, `<title>DATUM Gateway Status</title><table>
 		  <tr><td>Status:</td><td>Connected and Ready</td></tr>
 		  <tr><td>Pool Host:</td><td>pool.example:23334</td></tr>
 		  <tr><td>Pool Shares Accepted:</td><td>%d  (1 diff)</td></tr>

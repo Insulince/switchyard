@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"regexp"
 	"strconv"
@@ -108,6 +109,15 @@ func (co *coordinator) watchGateways(ctx context.Context) {
 	poll := func() {
 		for _, pool := range co.cfg.Pools {
 			info, err := inspectGatewayFull(ctx, pool.apiURL())
+			// Verified as DATUM before anything started, and now answering
+			// as something else: the gate's verdict applies mid-run too.
+			// A page that has merely stopped answering is a gateway
+			// restarting, not a verdict, and falls through to the error
+			// below like it always has.
+			if errors.Is(err, errNotDatum) && co.refuse != nil {
+				co.refuse(&foreignUpstreamError{pool: pool})
+				return
+			}
 			if err != nil {
 				prev, _ := co.gw.get(pool.Name)
 				prev.Err = err.Error()

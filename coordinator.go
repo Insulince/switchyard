@@ -38,6 +38,10 @@ type coordinator struct {
 	// is built. Nil outside a server, and every use of it is nil-safe.
 	feed *shareFeed
 
+	// refuse stops this whole generation for good: see datumgate.go. Set by
+	// the supervisor; nil outside one.
+	refuse func(error)
+
 	mu           sync.Mutex
 	step         int
 	rotations    int
@@ -627,6 +631,13 @@ type statusDoc struct {
 	// the dashboard because the operator is the only one who can fix it, and
 	// the process deliberately stays alive so they have a page to fix it from.
 	ReloadError string `json:"reloadError,omitempty"`
+
+	// The DATUM gate (datumgate.go). GateWaiting names a gateway that has not
+	// yet identified itself, so nothing has started; GateRefused is the
+	// refusal, and nothing will start until the config changes. Filled in by
+	// the server, like ReloadError.
+	GateWaiting string `json:"gateWaiting,omitempty"`
+	GateRefused string `json:"gateRefused,omitempty"`
 
 	// Configured is false when there are no rigs or no pools. Not an error --
 	// it is what a fresh install looks like, and it is what makes the page

@@ -268,6 +268,31 @@ Setting the flag back to false restored acceptance on the first share.
 
 ---
 
+## DATUM only, and it checks
+
+switchyard is for sovereign miners: every upstream is a DATUM gateway building
+block templates from **your own node**. It will not route hashrate to a pool
+that builds the templates for you, or to any other stratum endpoint that lets
+you mine without running a node.
+
+This is enforced, and it is all-or-nothing:
+
+- **Before anything starts**, every configured gateway must identify itself as
+  DATUM on its status page. Until all of them have, nothing runs: no upstream
+  sessions and no rig ports. A gateway that is still starting up is waited
+  for, and the dashboard says which one.
+- **One entry that answers as something else stops the whole setup**, not just
+  that entry. switchyard refuses to run until the entry is removed from the
+  config. The same applies if a gateway's status page later starts answering
+  as something other than DATUM.
+- **DATUM gateways that are not currently pooled still pass.** That covers a
+  gateway whose Prime connection dropped and one deliberately mining solo.
+  Both build from your own node, which is the point.
+
+Run a node.
+
+---
+
 ## Running it
 
 A single static binary, no dependencies.

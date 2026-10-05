@@ -60,12 +60,26 @@ func main() {
 		co.feed = srv.feed
 		srv.swap(co, cfg)
 
+		// One refusal per generation is all anyone needs to hear; a second
+		// from another gateway in the same pass is dropped, not queued.
+		refusedC := make(chan error, 1)
+		co.refuse = func(err error) {
+			select {
+			case refusedC <- err:
+			default:
+			}
+		}
+		// Closed once nothing in this generation can still be starting, so a
+		// teardown never races the gate bringing the rigs up behind it.
+		gateDone := make(chan struct{})
+
 		if !cfg.configured() {
 			// Nothing to mine with, which is the expected state of a fresh
 			// install rather than an error. The dashboard notices the same
 			// thing and shows a setup form instead of a dashboard.
 			log.Printf("switchyard: not configured yet -- open %s to set up rigs and pools",
 				browseURL(cfg.StatusListen))
+			close(gateDone)
 		} else {
 			log.Printf("switchyard: %d rigs %v across %d pools, dwell %ds-%ds",
 				len(cfg.Rigs), co.rigLabels(), len(cfg.Pools),
@@ -74,36 +88,78 @@ func main() {
 				log.Printf("note: %d pool(s) will be dark at any moment -- unavoidable with fewer rigs than pools",
 					len(cfg.Pools)-len(cfg.Rigs))
 			}
-			co.start(genCtx)
-			go co.watchDwellCeiling(genCtx)
-			go co.watchGateways(genCtx)
-			go co.watchPoolShares(genCtx)
-
-			for i := range cfg.Rigs {
-				go func(idx int) {
-					if err := serveRig(genCtx, co, idx); err != nil {
-						// A listener that cannot bind is fatal to THIS
-						// generation, not to the process. Reporting it on the
-						// dashboard and staying up is what lets the operator
-						// fix the port in the form; exiting would leave them
-						// with no page to fix it from.
-						log.Printf("rig listener failed: %v", err)
-						srv.setErr(err.Error())
+			go func() {
+				defer close(gateDone)
+				// Nothing -- not the upstream mesh, not a single rig port --
+				// exists until every gateway has proven it is DATUM. See
+				// datumgate.go.
+				var said string
+				err := verifyDatum(genCtx, cfg.Pools, func(why string) {
+					srv.setGate(why, "")
+					if why != said {
+						log.Printf("waiting to verify gateways before starting: %s", why)
+						said = why
 					}
-				}(i)
-			}
+				})
+				if err != nil {
+					if genCtx.Err() == nil {
+						co.refuse(err)
+					}
+					return
+				}
+				srv.setGate("", "")
+				log.Printf("every gateway verified as DATUM")
+
+				co.start(genCtx)
+				go co.watchDwellCeiling(genCtx)
+				go co.watchGateways(genCtx)
+				go co.watchPoolShares(genCtx)
+
+				for i := range cfg.Rigs {
+					go func(idx int) {
+						if err := serveRig(genCtx, co, idx); err != nil {
+							// A listener that cannot bind is fatal to THIS
+							// generation, not to the process. Reporting it on
+							// the dashboard and staying up is what lets the
+							// operator fix the port in the form; exiting would
+							// leave them with no page to fix it from.
+							log.Printf("rig listener failed: %v", err)
+							srv.setErr(err.Error())
+						}
+					}(i)
+				}
+			}()
+		}
+
+		teardown := func() {
+			cancel()
+			<-gateDone
+			co.shutdown()
 		}
 
 		select {
 		case <-ctx.Done():
-			cancel()
-			co.shutdown()
+			teardown()
 			log.Printf("shutting down")
 			return
+		case err := <-refusedC:
+			teardown()
+			log.Printf("REFUSING TO RUN: %v", err)
+			srv.setGate("", err.Error())
+			// Down until the config changes, not until the gateway does: the
+			// setup is what is invalid. The dashboard stays up, because it
+			// is where the offending entry gets removed.
+			select {
+			case <-ctx.Done():
+				log.Printf("shutting down")
+				return
+			case <-srv.reloadC:
+				log.Printf("reloading from %s", *configPath)
+				time.Sleep(settleDelay)
+			}
 		case <-srv.reloadC:
 			log.Printf("reloading from %s", *configPath)
-			cancel()
-			co.shutdown()
+			teardown()
 			// Let listeners actually release their ports before the next
 			// generation tries to bind them.
 			time.Sleep(settleDelay)

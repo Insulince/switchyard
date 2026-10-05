@@ -314,6 +314,11 @@ header button[title], .tip[title] { cursor: pointer; }
   padding: 0.5rem 0.8rem; font-size: 0.74rem;
 }
 #reloadBanner.show { display: block; }
+/* Not an error yet: a gateway that has not answered is usually one still
+   starting. Nothing is mining meanwhile, so it still gets the banner. */
+#reloadBanner.wait {
+  border-color: var(--gold); background: rgba(242,193,78,.07); color: var(--gold);
+}
 
 /* A frame-timing readout, off unless ?perf=1 is in the URL.
    Jank of this kind cannot be measured from a background tab -- the browser
@@ -2804,12 +2809,23 @@ function render(d) {
   // A reload that could not fully come up is the one condition the operator
   // has to act on, and it is invisible otherwise -- the page would just show
   // a rig that never connects.
+  //
+  // The DATUM gate outranks it: while the gate holds, nothing has started, so
+  // there is no reload to have half-failed. See datumgate.go.
   var banner = $("reloadBanner");
-  banner.classList.toggle("show", !!d.reloadError);
-  if (d.reloadError) {
-    banner.textContent = "Last config reload did not fully start: " + d.reloadError
+  var bannerText = "";
+  if (d.gateRefused) {
+    bannerText = "Not running: " + d.gateRefused + " — open CONFIGURE to remove it.";
+  } else if (d.gateWaiting) {
+    bannerText = "Not mining yet: every gateway must identify itself as DATUM before "
+      + "anything starts. Still waiting on " + d.gateWaiting + ".";
+  } else if (d.reloadError) {
+    bannerText = "Last config reload did not fully start: " + d.reloadError
       + " — open CONFIGURE to fix it.";
   }
+  banner.classList.toggle("show", !!bannerText);
+  banner.classList.toggle("wait", !!d.gateWaiting && !d.gateRefused);
+  if (bannerText && banner.textContent !== bannerText) banner.textContent = bannerText;
 
   // Unconfigured is a state, not an error. Showing a dashboard of dashes over
   // it would invite reading numbers that mean nothing yet.
@@ -2859,7 +2875,7 @@ function render(d) {
   // grace window the page says what it is doing and roughly how long it takes.
   var arriving = (d.rigs || []).filter(function (r) { return rigState(r) === "arriving"; });
   var wb = $("waitBanner");
-  wb.classList.toggle("show", arriving.length > 0 && !d.reloadError);
+  wb.classList.toggle("show", arriving.length > 0 && !bannerText);
   if (arriving.length) {
     var names = arriving.map(function (r) { return r.name; }).join(", ");
     // NOT rotations. A rotation drops the miner's connection too, but the
