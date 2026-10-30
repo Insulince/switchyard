@@ -31,7 +31,7 @@ func TestValidateRawRejectsWhatDefaultsWouldHide(t *testing.T) {
 		{"sane", func(c *config) { c.MinDwellSeconds, c.MaxDwellSeconds = 60, 900 }, false},
 		{"negative floor", func(c *config) { c.MinDwellSeconds = -5 }, true},
 		{"negative ceiling", func(c *config) { c.MaxDwellSeconds = -1 }, true},
-		{"negative poll", func(c *config) { c.PollSeconds = -0.5 }, true},
+		{"negative poll", func(c *config) { c.DashboardPollSeconds = -0.5 }, true},
 		{"equal floor and ceiling", func(c *config) { c.MinDwellSeconds, c.MaxDwellSeconds = 300, 300 }, true},
 		{"ceiling below floor", func(c *config) { c.MinDwellSeconds, c.MaxDwellSeconds = 300, 120 }, true},
 		{"both omitted", func(c *config) {}, false},
@@ -214,7 +214,7 @@ func TestUnpooledGatewayIsFlaggedAndKeepsItsConfigName(t *testing.T) {
 
 	cfg := config{
 		Pools: []poolConfig{{Name: "RIPTIDE", Host: "127.0.0.1", Port: 23336, StatusPort: 7154}},
-		Rigs:  []rigConfig{{Listen: "0.0.0.0:23401"}},
+		Rigs:  []rigConfig{{Port: 23401, Protocol: "sv1"}},
 	}
 	cfg.applyDefaults()
 	co := newCoordinator(cfg)
@@ -235,7 +235,7 @@ func TestBoundToUsesTheSameNameAsThePool(t *testing.T) {
 			{Name: "config-label-a", Host: "127.0.0.1", Port: 23336, StatusPort: 7154},
 			{Name: "config-label-b", Host: "127.0.0.1", Port: 23337, StatusPort: 7155},
 		},
-		Rigs: []rigConfig{{Listen: "0.0.0.0:23401"}},
+		Rigs: []rigConfig{{Port: 23401, Protocol: "sv1"}},
 	}
 	cfg.applyDefaults()
 	co := newCoordinator(cfg)
@@ -246,7 +246,7 @@ func TestBoundToUsesTheSameNameAsThePool(t *testing.T) {
 
 	// Bind the rig to the second pool, the way a real session would.
 	co.mu.Lock()
-	co.sessions[0] = []*rigSession{{co: co, rigIdx: 0, up: co.ups[0][1]}}
+	co.sessions[0] = []downstreamSession{&rigSession{co: co, rigIdx: 0, up: co.ups[0][1]}}
 	co.mu.Unlock()
 
 	doc := co.status()
@@ -338,21 +338,32 @@ func TestProbeStratumReportsAClosedPort(t *testing.T) {
 // process down with every rig on it -- and since the file is already saved,
 // every restart afterwards fails the same way.
 func TestSaveRefusesAnUnbindableDashboardAddress(t *testing.T) {
-	// Hold a port so the incoming value cannot bind.
-	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	// Hold a port on every interface so the dashboard's ":<port>" bind conflicts
+	// (the dashboard always binds all interfaces, so holding only loopback would
+	// not collide on every platform).
+	busy, err := net.Listen("tcp", ":0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer busy.Close()
-	taken := busy.Addr().String()
+	takenPort := busy.Addr().(*net.TCPAddr).Port
+
+	// A genuinely free port for the rig, so the rig bind-check passes and the
+	// dashboard bind is the only thing that fails.
+	freeLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rigPort := freeLn.Addr().(*net.TCPAddr).Port
+	freeLn.Close()
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	srv := newServer(path)
 
 	body := fmt.Sprintf(
-		`{"statusListen":%q,"pools":[{"name":"A","host":"h","port":23336,"statusPort":7154}],`+
-			`"rigs":[{"listen":"0.0.0.0:0"}]}`, taken)
+		`{"dashboardPort":%d,"pools":[{"name":"A","host":"h","port":23336,"statusPort":7154,"protocol":"sv1"}],`+
+			`"rigs":[{"port":%d,"protocol":"sv1"}]}`, takenPort, rigPort)
 
 	rec := httptest.NewRecorder()
 	srv.saveAndReload(rec, httptest.NewRequest(http.MethodPost, "/config", strings.NewReader(body)))
@@ -443,7 +454,7 @@ func TestStatusMarksTheSoloPool(t *testing.T) {
 			{Name: "Solo", Host: "127.0.0.1", Port: 23336, StatusPort: 7154},
 			{Solo: true, Host: "127.0.0.1", Port: 23339, StatusPort: 7157},
 		},
-		Rigs: []rigConfig{{Listen: "0.0.0.0:23401"}},
+		Rigs: []rigConfig{{Port: 23401, Protocol: "sv1"}},
 	}
 	cfg.applyDefaults()
 	co := newCoordinator(cfg)

@@ -52,6 +52,15 @@
      unlike every status colour here -- green, red, amber, gold -- so it
      cannot be read as one. */
   --solo:      #8b7cf6;
+  /* The protocol marker hue, shared by both wires. Like --solo, an IDENTITY
+     not a status: "this hop speaks Stratum Vn", never good or bad. The two
+     wires are the SAME amber and differ only in fill -- sv2 filled, sv1 an
+     outline -- so sv2 reads as the one to prefer without implying sv1 is wrong.
+     Amber, not teal: it is warmer and more inviting than the old cyan. It is a
+     static chip in a box, never the moving gold of a rotation, so the two do
+     not compete. */
+  --sv2:       #f0a830;
+  --sv1:       #f0a830;
 }
 
 * { box-sizing: border-box; }
@@ -230,6 +239,34 @@ header button[title], .tip[title] { cursor: pointer; }
   font-size: 0.6rem; letter-spacing: .12em; color: var(--solo);
   border: 1px solid var(--solo); border-radius: 3px; padding: 0 0.3rem;
 }
+/* Protocol badges. On the rig title (how the miner speaks to switchyard) and
+   on the switchyard box's connection rows (how switchyard then reaches that
+   gateway) -- the two hops that are genuinely one wire or the other. Not on
+   the pool or the gateway: a pool is just a pool and a DATUM gateway speaks
+   both. sv1 is drawn muted and receding, sv2 filled and emphasised -- a quiet
+   nudge that sv2 is the one to prefer. Like --solo it is an IDENTITY, never a
+   status (good/bad); the asymmetry in weight is the only editorial note. */
+.protobadge {
+  font-size: 0.58rem; letter-spacing: .12em; border-radius: 3px;
+  padding: 0 0.28rem; margin-left: 0.4rem; vertical-align: middle;
+  white-space: nowrap; border: 1px solid transparent;
+}
+/* No connection: a dashed, muted chip the same size as sv1/sv2, carrying a
+   times sign. It holds the column's shape so an unbound row reads as "nothing
+   here" rather than as a gap. */
+.protobadge.none {
+  color: var(--sentinel); border-color: var(--sentinel);
+  border-style: dashed; opacity: 0.75;
+}
+/* sv1: amber outline that recedes. */
+.protobadge.sv1 { color: var(--sv1); border-color: var(--sv1); opacity: 0.8; }
+/* sv2: filled amber chip -- dark text on the amber so it reads as "lit up"
+   beside the sv1 outline. Self-contained (sets its own fg+bg), so it holds in
+   either page theme. */
+.protobadge.sv2 {
+  color: #2a1d02; background: var(--sv2);
+  border-color: var(--sv2); font-weight: 600;
+}
 .fgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.55rem 0.8rem; }
 @media (max-width: 640px) { .fgrid { grid-template-columns: 1fr; } }
 .f { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
@@ -299,6 +336,47 @@ header button[title], .tip[title] { cursor: pointer; }
 .f .hintline { font-size: 0.66rem; color: var(--sentinel); line-height: 1.4; }
 .f .hintline.err { color: var(--bad); }
 .f .hintline.ok { color: var(--good); }
+/* A growing main field beside a compact control (port+protocol, host+protocol).
+   flex-direction:row is explicit because .fieldrow is also a .f, which sets
+   column -- without this the two controls stack instead of sitting side by side. */
+.fieldrow { display: flex; flex-direction: row; align-items: flex-end; gap: 0.8rem; }
+.fieldrow > .grow { flex: 1; min-width: 0; }
+.f.proto { flex: 0 0 auto; }
+/* SV1/SV2 selector in the config form. Compact (content width), the active half
+   the same amber as the protocol badge, so "which wire" reads the same here as
+   it does on the flow. */
+.segtoggle { display: inline-flex; border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
+.segtoggle .seg {
+  background: transparent; color: var(--dim); border: 0; font: inherit;
+  font-size: 0.72rem; letter-spacing: .08em; padding: 0.3rem 0.85rem; cursor: pointer;
+}
+.segtoggle .seg + .seg { border-left: 1px solid var(--border); }
+/* The selected half carries the same sv2-filled / sv1-outline sense as the
+   protocol badges on the flow: SV2 chosen is solid amber (the preferred wire),
+   SV1 chosen is the same amber but only outlined -- selected and valid, yet
+   visibly the lesser choice. The class is "seg sv1"/"seg sv2", so these only
+   bite when that half is also ".on". */
+.segtoggle .seg.on.sv2 { background: var(--sv2); color: #2a1d02; font-weight: 600; }
+.segtoggle .seg.on.sv1 { background: transparent; color: var(--sv1); font-weight: 600; box-shadow: inset 0 0 0 1px var(--sv1); }
+/* The read-out of switchyard's own SV2 public key for a rig -- the one thing the
+   operator carries away from this card and types into a miner. The copy button
+   sits on the label row (fixed width) so the key below keeps a stable wrap. */
+.keyout { border: 1px solid var(--border); border-radius: 6px; padding: 0.55rem 0.65rem; margin-top: 0.3rem; background: rgba(240,168,48,.05); }
+.keyout.muted { color: var(--dim); font-size: 0.74rem; }
+.keyhead { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }
+.keyhead .spacer { flex: 1; }
+.keylabel { font-size: 0.64rem; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+.keyval { display: block; font-size: 0.7rem; line-height: 1.5; word-break: break-all; color: var(--text); }
+.keyval.pub { color: var(--good); }
+.keyactions { display: flex; gap: 0.4rem; margin-top: 0.45rem; }
+.btn.tiny.ghost { background: transparent; color: var(--dim); }
+.btn.tiny.copybtn { min-width: 3.6rem; text-align: center; }
+/* The private secret field: input + reveal toggle on one line. */
+.secretrow { display: flex; align-items: center; gap: 0.5rem; }
+.secretrow > .grow { flex: 1; min-width: 0; }
+.revealbtn { flex: 0 0 auto; }
+/* A short caption under a field (e.g. where to find the gateway's key). */
+.fieldnote { font-size: 0.68rem; color: var(--sentinel); line-height: 1.45; margin-top: -0.1rem; }
 .adv { grid-column: 1 / -1; margin-top: 0.1rem; }
 .adv summary {
   cursor: pointer; font-size: 0.66rem; color: var(--sentinel);
@@ -496,6 +574,11 @@ header .help { margin-left: 0.35rem; }
   transition: border-color .6s, box-shadow .6s, background .6s;
 }
 .node .n { font-weight: 600; font-size: 0.9rem; }
+/* The rig title carries a protocol chip; float it to the far right of the card
+   rather than letting it sit against the name, so the chips line up down the
+   Rigs column and the name has room to breathe. */
+.n.rigtitle { display: flex; align-items: center; }
+.n.rigtitle .protobadge { margin-left: auto; }
 .node .m { font-size: 0.73rem; color: var(--dim); }
 .node .m b { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
 .node .m .sentinel { color: var(--sentinel); font-style: italic; }
@@ -570,7 +653,7 @@ header .help { margin-left: 0.35rem; }
    put every arrow at a different x, so the eye had to re-find the mapping on
    each row; pinned to a column they read as one table. */
 .port {
-  display: grid; grid-template-columns: auto 1fr auto;
+  display: grid; grid-template-columns: auto 1fr auto auto;
   align-items: baseline; gap: 0.5rem;
   font-size: 0.73rem; color: var(--dim);
   padding: 0.2rem 0.1rem;
@@ -579,6 +662,13 @@ header .help { margin-left: 0.35rem; }
 .port .arrow { text-align: center; color: var(--heartbeat); }
 .port .to { color: var(--good); text-align: right; }
 .port .to.none { color: var(--sentinel); }
+/* The protocol chip is its own aligned column here, so the grid gap sets its
+   spacing -- the inline margin it needs on a rig title would double it up. A
+   min-width keeps every row's chip the same size, so the unbound cross sits in
+   a box identical to an sv1/sv2 chip rather than a narrower one. */
+.port .protobadge {
+  margin-left: 0; min-width: 2rem; text-align: center; box-sizing: border-box;
+}
 
 /* Solid means carrying work; dashed means held open but idle. The earlier
    version had these backwards -- a dash reads as a weak or intermittent
@@ -1224,7 +1314,16 @@ markOf(n, "<p><b>A physical miner.</b> It connects to switchyard on its own "
       + "<p>That indirection is the whole design: the rig is configured once "
       + "and never reconfigured, while switchyard moves which pool its work "
       + "reaches.</p>");
-    n.appendChild(el("div", "n", r.name));
+    // The name lives in its own .nm span so the per-poll heading refresh can
+    // update it WITHOUT wiping the protocol badge beside it: setting textContent
+    // on .n directly would delete the badge child.
+    var rtitle = el("div", "n rigtitle");
+    rtitle.appendChild(el("span", "nm", r.name));
+    var rproto = r.protocol === "sv2" ? "sv2" : "sv1";
+    var rbadge = el("span", "protobadge " + rproto, rproto.toUpperCase());
+    markOf(rbadge, protoHelp("rig", rproto));
+    rtitle.appendChild(rbadge);
+    n.appendChild(rtitle);
     var now = el("div", "m"), avg = el("div", "m"), where = el("div", "m"), who = el("div", "m");
     n.appendChild(now); n.appendChild(avg); n.appendChild(where); n.appendChild(who);
     rigs.appendChild(n);
@@ -1246,12 +1345,20 @@ markOf(n, "<p><b>A physical miner.</b> It connects to switchyard on its own "
     var row = el("div", "port");
 markOf(row, "<p><b>Listener for " + r.name + ".</b> Point that miner here and leave "
       + "it there; switchyard decides which gateway it reaches.</p>");
-    row.appendChild(el("span", "p", r.listen.replace(/^0\.0\.0\.0/, "")));
+    row.appendChild(el("span", "p", ":" + r.port));
     row.appendChild(el("span", "arrow", "→"));
+    // Destination and protocol are two aligned columns, not one run of text.
+    // The pool name is just a pool; the chip beside it is how switchyard
+    // reaches that gateway -- sv1 or sv2 -- the ONE hop here that is genuinely
+    // one wire or the other (a DATUM gateway speaks both, so it carries no
+    // badge). Its own grid cell so every row's chip lines up in a column, and
+    // so the per-poll name update cannot touch it.
     var to = el("span", "to");
+    var tochip = el("span", "protobadge");
     row.appendChild(to);
+    row.appendChild(tochip);
     h.appendChild(row);
-    nodes.ports[i] = { row: row, to: to };
+    nodes.ports[i] = { row: row, to: to, chip: tochip };
   });
   h.appendChild(el("div", "sep"));
   var hm2 = el("div", "m");
@@ -1303,7 +1410,13 @@ markOf(n, "<p><b>The pool behind that gateway</b> — and the one thing on this 
       + "— and it is what the fairness band below is measuring.</p>"
       + "<p>The name and address are labels from "
       + "<span class=\"k\">config.json</span>, not anything discovered.</p>");
-    n.appendChild(el("div", "n", p.solo ? SOLO_TITLE : p.name));
+    // No protocol badge here: a pool is just a pool, and the gateway in front
+    // of it speaks both wires. Which wire THIS connection uses is shown on the
+    // switchyard box's row for the port bound to it, where the connection
+    // actually lives.
+    var ptitle = el("div", "n");
+    ptitle.appendChild(el("span", "nm", p.solo ? SOLO_TITLE : p.name));
+    n.appendChild(ptitle);
     if (p.solo) {
 markOf(n, "<p><b>The solo slot.</b> The gateway in front of this is "
         + "configured with no pool: while a rig is on it, it is mining solo "
@@ -1374,6 +1487,38 @@ function markOf(node, html) {
   if (node.dataset.mark !== "") node.dataset.mark = "";
 }
 
+// protoHelp is the tooltip for a protocol chip. hop says which hop it marks --
+// "rig" is the miner's link up to switchyard, "conn" is switchyard's link out
+// to a gateway -- and proto is the wire it currently speaks ("sv1"/"sv2", or ""
+// for an unbound connection row). It answers the two questions a chip invites:
+// what SV1/SV2 mean, and why switchyard is showing it here.
+function protoHelp(hop, proto) {
+  if (hop === "conn" && !proto) {
+    return "<p><b>No connection.</b> This port has no miner reaching a gateway "
+      + "right now, so there is no wire protocol to name.</p>"
+      + "<p>Stratum is the language a mining connection speaks; with no "
+      + "connection there is none. A miner arriving, or the next rotation, "
+      + "binds the port and this fills in.</p>";
+  }
+  var name = proto === "sv2" ? "Stratum V2" : "Stratum V1";
+  var where = hop === "rig"
+    ? "how this miner talks to switchyard"
+    : "how switchyard reaches this gateway";
+  var tail = hop === "rig"
+    ? "<p>switchyard speaks both and translates between them, so this miner can "
+      + "be sent to a gateway running either one -- which is the whole point of "
+      + "the box.</p>"
+    : "<p>switchyard translates between the two, so an SV2 miner can mine an SV1 "
+      + "gateway and the reverse. When this chip disagrees with the rig's own, "
+      + "you are watching that translation happen.</p>";
+  return "<p><b>" + name + "</b> &mdash; " + where + ".</p>"
+    + "<p>Stratum is the language miners and pools speak. <b>V1</b> is the "
+    + "original: text-based and universal. <b>V2</b> is the newer binary "
+    + "protocol &mdash; leaner on the wire, and it can authenticate the "
+    + "connection rather than trusting the network.</p>"
+    + tail;
+}
+
 // setMeta rebuilds a line of node text -- but only when that line differs.
 //
 // It clears and recreates its children, which is the right shape for content
@@ -1394,11 +1539,12 @@ function update(d) {
   d.rigs.forEach(function (r, i) {
     var n = nodes.rigs[i];
     if (!n) return;
-    // The heading is rewritten each poll now: the name arrives from the miner
-    // after the node was built, so a name painted once at construction would
-    // read "port 23401" forever.
-    var heading = n.box.querySelector(".n");
-    if (heading && heading.textContent !== r.name) heading.textContent = r.name;
+    // The name is rewritten each poll: it arrives from the miner after the node
+    // was built, so a name painted once at construction would read "port 23401"
+    // forever. Update only the .nm span, never .n's textContent -- that would
+    // delete the protocol badge sitting beside the name.
+    var nm = n.box.querySelector(".n .nm");
+    if (nm && nm.textContent !== r.name) nm.textContent = r.name;
 
     setMeta(n.now, [{ text: ths(r.nowThs) }, " TH/s now"]);
 markOf(n.now, "<p><b>Right now.</b> Measured from accepted-share difficulty over the "
@@ -1465,9 +1611,9 @@ markOf(n.avg, "<p><b>Average over the whole run</b>, across every pool this rig 
       + "hardware has been doing.</p>");
     var st = rigState(r);
     n.where.textContent = r.connected
-      ? (r.listen.replace(/^0\.0\.0\.0/, "") + " → " + (r.boundTo || "unbound"))
+      ? (":" + r.port + " → " + (r.boundTo || "unbound"))
       : (st === "arriving"
-          ? r.listen.replace(/^0\.0\.0\.0/, "") + " · " + waitLabel(r)
+          ? ":" + r.port + " · " + waitLabel(r)
           : "miner not connected");
     setClass(n.box, "node " + (st === "live" ? "live" : st === "arriving" ? "arriving" : "offline"));
   });
@@ -1476,14 +1622,29 @@ markOf(n.avg, "<p><b>Average over the whole run</b>, across every pool this rig 
   d.pools.forEach(function (p) { if (p.occupants.length) carrying++; });
   nodes.hub.line1.textContent = d.rigs.length + " rigs × " + d.pools.length + " gateways · "
     + (d.rigs.length * d.pools.length) + " sessions held open";
-  nodes.hub.line2.textContent = "rig i → pool (i+t) mod " + d.pools.length
-    + " · " + carrying + " carrying, " + (d.pools.length - carrying) + " dark";
+  nodes.hub.line2.textContent = "live rigs spread across gateways · "
+    + carrying + " carrying, " + (d.pools.length - carrying) + " dark";
 
+  // How switchyard speaks to each gateway, keyed by the pool name a binding
+  // reports. Fixed by config per pool, so the chip on a row is really a fact
+  // about the destination, revealed as the binding rotates onto it.
+  var poolProto = {};
+  d.pools.forEach(function (p) { poolProto[p.name] = p.protocol === "sv2" ? "sv2" : "sv1"; });
   d.rigs.forEach(function (r, i) {
     var pr = nodes.ports[i];
     if (!pr) return;
-    pr.to.textContent = r.boundTo || "unbound";
+    var name = r.boundTo || "unbound";
+    if (pr.to.textContent !== name) pr.to.textContent = name;
     setClass(pr.to, "to" + (r.boundTo ? "" : " none"));
+    // The protocol column. A live binding shows its wire; an unbound row shows
+    // a dashed "nothing here" chip the same size (a times sign), so the column
+    // still reads as a column instead of going blank.
+    var pp = r.boundTo ? poolProto[r.boundTo] : null;
+    setClass(pr.chip, pp ? "protobadge " + pp : "protobadge none");
+    var txt = pp ? pp.toUpperCase() : "×";
+    if (pr.chip.textContent !== txt) pr.chip.textContent = txt;
+    // Tooltip tracks the chip's current state; markOf no-ops when unchanged.
+    markOf(pr.chip, protoHelp("conn", pp || ""));
   });
 
   d.pools.forEach(function (p, j) {
@@ -1596,9 +1757,9 @@ markOf(n.mode, "<p><b>This gateway has no pool.</b> Its Prime connection is down
     var n = nodes.pools[j];
     if (!n) return;
     // The label can be edited under a node that already exists.
-    var poolHeading = n.box.querySelector(".n");
+    var poolNm = n.box.querySelector(".n .nm");
     var poolTitle = p.solo ? SOLO_TITLE : p.name;
-    if (poolHeading && poolHeading.textContent !== poolTitle) poolHeading.textContent = poolTitle;
+    if (poolNm && poolNm.textContent !== poolTitle) poolNm.textContent = poolTitle;
 
     if (p.solo) {
       setMeta(n.host, p.health && p.health.soloMismatch
@@ -1783,6 +1944,11 @@ function curve(a, b) {
 }
 
 var pathSeq = 0;
+
+// Sparks currently travelling, keyed by leg ("gw:rig:pool"). drawLinks hands
+// each one its leg's new path on every rebuild (reglueSpark) so a reflow can
+// never leave it stranded off its track.
+var activeSparks = {};
 
 // linkSig is everything about the diagram that changes its SHAPE: the size of
 // the area, which rigs exist and are connected, and where each is bound. The
@@ -2437,8 +2603,13 @@ function drawLinks(d, entered, force) {
       // Only the carrying link is labelled. Six labels for six links is noise,
       // and the idle ones all read 0.00 by definition -- the gateway node
       // states that far more legibly.
-      var link = add(pr.row, gn.box, on, (on && g) ? ths(g.nowThs) + " TH/s" : null, 0.72, "gw:" + r.name + ":" + p.name);
-      if (on && entered[p.name]) fireSpark(null, link.d);
+      var key = "gw:" + r.name + ":" + p.name;
+      var link = add(pr.row, gn.box, on, (on && g) ? ths(g.nowThs) + " TH/s" : null, 0.72, key);
+      // A rig that just arrived here gets a fresh spark; a spark already
+      // travelling this leg gets re-pointed at the track's current path, so
+      // this rebuild's new geometry cannot leave it floating off the line.
+      if (on && entered[p.name]) fireSpark(key, link.d);
+      else reglueSpark(key, link.d);
     });
   });
 
@@ -2493,25 +2664,48 @@ function drawLinks(d, entered, force) {
   refreshFlow(d);
 }
 
-function fireSpark(_ignored, dstr) {
+// reglueSpark hands an in-flight spark its leg's CURRENT path, so a reflow
+// since it launched cannot leave it floating off the track.
+//
+// The spark lives on #fx, which drawLinks never clears -- that is what lets a
+// 3.6s spark outlast a 2s poll. The cost is that it keeps the geometry it was
+// fired with, while the track on #links is recomputed from live positions on
+// every rebuild. A rotation reflows the diagram (cards change height, nodes
+// shift vertically), so the redrawn track slides out from under a spark that
+// stays put. Because the spark path is normalised (pathLength=1), re-pointing
+// it is a single attribute swap: the dash metrics are fractions of the path,
+// unchanged by the new length, so the animation keeps running and its progress
+// is preserved -- the spark simply snaps onto the track's new shape.
+function reglueSpark(legKey, dstr) {
+  var s = activeSparks[legKey];
+  if (s) s.path.setAttribute("d", dstr);
+}
+
+function fireSpark(legKey, dstr) {
   if (!motionOn()) return null;
+  // A second rotation onto the same leg before the first spark has faded: end
+  // the old one first, so its teardown cannot later delete the new one's entry.
+  if (legKey && activeSparks[legKey]) activeSparks[legKey].done();
   var layer = $("fx");
-  var p = svgEl("path", { d: dstr, "class": "spark" });
+  // pathLength normalises the geometry to 1, so the dash lengths below are
+  // fractions of the path rather than pixels -- which is what makes reglueSpark
+  // a bare "d" swap with no re-measuring and no restart.
+  var p = svgEl("path", { d: dstr, "class": "spark", pathLength: 1 });
   layer.appendChild(p);
-  var len = p.getTotalLength();
-  var head = len * 0.22;
+  var head = 0.22;
 
   // The travel runs from "entirely before the start" to "entirely past the
   // end", so the spark is seen to LEAVE switchyard and then be ABSORBED by the
   // gateway: its head reaches the box edge first and the tail is drawn in
   // after it, rather than the whole thing winking out on arrival.
-  p.style.strokeDasharray = head + " " + len;
+  p.style.strokeDasharray = head + " 1";
   var a = p.animate(
-    [{ strokeDashoffset: head }, { strokeDashoffset: -len }],
+    [{ strokeDashoffset: head }, { strokeDashoffset: -1 }],
     { duration: 3600, easing: "cubic-bezier(.35,0,.2,1)", fill: "forwards" }
   );
+  var entry = { path: p };
   var gone = false;
-  function done() {
+  entry.done = function () {
     if (gone) return;
     gone = true;
     // Cancelled, not merely detached. fill:"forwards" keeps a finished
@@ -2519,13 +2713,15 @@ function fireSpark(_ignored, dstr) {
     // is a lot of them.
     a.cancel();
     if (p.parentNode) p.parentNode.removeChild(p);
-  }
-  a.onfinish = done;
+    if (legKey && activeSparks[legKey] === entry) delete activeSparks[legKey];
+  };
+  a.onfinish = entry.done;
   // A timer as well as the finish handler, because a browser tab in the
   // background throttles animations: onfinish may not arrive for minutes, and
   // sparks would pile up unremoved on a dashboard somebody left open behind
   // another window. Whichever fires first wins; done() is idempotent.
-  setTimeout(done, 4200);
+  setTimeout(entry.done, 4200);
+  if (legKey) activeSparks[legKey] = entry;
   return p;
 }
 
@@ -2869,8 +3065,8 @@ function renderTable(d) {
     var rst = rigState(r);
     c.appendChild(el("span", rst === "live" ? "on" : rst === "arriving" ? "pending" : "off",
       r.connected
-        ? "→ " + (r.boundTo || "unbound") + " · " + ths(r.nowThs) + " TH/s · " + r.listen
-        : (rst === "arriving" ? waitLabel(r) : "miner not connected") + " · " + r.listen));
+        ? "→ " + (r.boundTo || "unbound") + " · " + ths(r.nowThs) + " TH/s · :" + r.port
+        : (rst === "arriving" ? waitLabel(r) : "miner not connected") + " · :" + r.port));
     head.appendChild(c);
     body.appendChild(head);
 
@@ -3075,7 +3271,7 @@ function render(d) {
   var up = agoFull(d.startedAt, d.now);
   $("sUp").textContent = up.pretty;
   $("sPoll").textContent = num(up.total) + "s · refresh every "
-    + d.pollSeconds + "s";
+    + d.dashboardPollSeconds + "s";
 
   // Rebuild when the shape changes, not when a name does. Indexes are stable
   // across a rename; a different number of rigs or pools is a different scene.
@@ -3171,9 +3367,9 @@ function poll() {
       } else {
         render(d);
       }
-      // The server owns the cadence, so changing pollSeconds in config.json
-      // takes effect on the next tick without touching this file.
-      var want = Math.max(500, (d.pollSeconds || 2) * 1000);
+      // The server owns the cadence, so changing dashboardPollSeconds in
+      // config.json takes effect on the next tick without touching this file.
+      var want = Math.max(500, (d.dashboardPollSeconds || 2) * 1000);
       if (want !== pollEvery) {
         pollEvery = want;
         clearInterval(pollTimer);
@@ -3363,6 +3559,11 @@ $("resetConfirmBtn").addEventListener("click", async function () {
 // The editor holds a WORKING COPY. Nothing touches the running system until
 // Save, which writes the file and asks the process to rebuild from it.
 var draft = null;
+// switchyard's SV2 authority PUBLIC keys, keyed by rig listen address, as the
+// last /config load reported them. The secret never comes here; this is the
+// half an operator pins on a miner, shown beside the rig that owns it.
+var rigPubByPort = {};
+var pubPreviewTimer = null;
 var draftPath = "config.json";
 
 function field(label, value, opts) {
@@ -3436,15 +3637,294 @@ function cardHead(title, onRemove) {
 // 127.0.0.1 to keep a rig local, or one address on a multi-homed box -- is
 // making a real choice, and hiding it behind a port field would silently
 // widen the bind the next time somebody pressed save.
-function isWildcard(listen) {
-  return /^(0\.0\.0\.0:|:)?\d+$/.test(String(listen || "").trim());
+
+// ---- SV2 identity editing ---------------------------------------------------
+// The draft's authoritySecret is the single source of truth for what gets
+// saved. Everything below is ephemeral QoL on top of it: stashes so a mis-click
+// or a protocol flip does not throw away a key already typed or generated, and
+// in-screen generation so the public key appears at once rather than after a
+// save. A tab refresh clears all of it, which is fine -- none of it is state the
+// server depends on.
+var stagedPub = {};    // staged handle -> its PUBLIC key (generated this session)
+var rigIdStash = {};   // rig port -> { set, manual, lastMode } across switches
+var poolKeyStash = {}; // pool index -> authorityKey, across an sv1 flip
+var genInFlight = {};  // rig port -> a generate request is already running
+var keyCheckTimer = null;
+
+function isStaged(sec) { return typeof sec === "string" && sec.indexOf("__staged__:") === 0; }
+function isSetValue(sec) { return sec === "__keep__" || isStaged(sec); }
+function pubForSet(port, sec) {
+  if (sec === "__keep__") return rigPubByPort[port] || "";
+  if (isStaged(sec)) return stagedPub[sec.slice("__staged__:".length)] || "";
+  return "";
 }
-function portOf(listen) {
-  var m = /(\d+)\s*$/.exec(String(listen || ""));
-  return m ? m[1] : "";
+function findRigByPort(port) {
+  for (var i = 0; i < draft.rigs.length; i++) if (draft.rigs[i].port === port) return draft.rigs[i];
+  return null;
 }
-function listenDisplay(listen) {
-  return isWildcard(listen) ? portOf(listen) : String(listen || "");
+
+// protoField is a COMPACT SV1/SV2 selector, sized to its content so it sits
+// beside the port or host rather than stretching a whole row. onPick fires only
+// on an actual change.
+function protoField(label, current, helpKey, onPick) {
+  var wrap = el("div", "f proto");
+  var lab = el("label", null, label);
+  if (helpKey) lab.appendChild(helpMarker(helpKey));
+  wrap.appendChild(lab);
+  var seg = el("div", "segtoggle");
+  ["sv1", "sv2"].forEach(function (p) {
+    // The protocol goes in the class ("seg sv1" / "seg sv2") so the selected
+    // half can be styled per-wire -- sv2 filled, sv1 outlined -- not just "on".
+    var b = el("button", "seg " + p + (current === p ? " on" : ""), p.toUpperCase());
+    b.type = "button";
+    b.addEventListener("click", function () { if (current !== p) onPick(p); });
+    seg.appendChild(b);
+  });
+  wrap.appendChild(seg);
+  return wrap;
+}
+
+// fieldRow lays a growing main field beside a compact control on one line, so a
+// toggle can live next to the port or host instead of on its own row.
+function fieldRow(mainEl, sideEl) {
+  var row = el("div", "f wide fieldrow");
+  mainEl.classList.add("grow");
+  row.appendChild(mainEl);
+  row.appendChild(sideEl);
+  return row;
+}
+
+// copyMini copies getText() with brief "Copied" feedback. Fixed width via CSS,
+// so the longer "Copied" cannot reflow whatever sits beside it.
+function copyMini(getText) {
+  var b = el("button", "btn tiny copybtn", "Copy");
+  b.type = "button";
+  b.addEventListener("click", function () {
+    var t = getText();
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t).then(function () {
+        b.textContent = "Copied";
+        setTimeout(function () { b.textContent = "Copy"; }, 1400);
+      });
+    }
+  });
+  return b;
+}
+
+// rigKeyReadout shows switchyard's PUBLIC authority key for an SV2 rig. The
+// what/why lives in a tooltip on the label; the copy button sits on the label
+// row (fixed width) so the key below it keeps a stable wrap.
+function rigKeyReadout(pubkey) {
+  var box = el("div", "keyout");
+  var head = el("div", "keyhead");
+  var lab = el("span", "keylabel", "Authority key");
+  lab.appendChild(helpMarker("rigAuthorityKey"));
+  head.appendChild(lab);
+  head.appendChild(el("span", "spacer"));
+  if (pubkey) head.appendChild(copyMini(function () { return pubkey; }));
+  box.appendChild(head);
+  box.appendChild(el("code", "keyval pub", pubkey || "—"));
+  return box;
+}
+
+// maskedSecretField is the hand-entered authority SECRET: a private key, so it
+// is masked like a password with a reveal toggle, and clearly labelled private.
+function maskedSecretField(value, onInput) {
+  var wrap = el("div", "f wide");
+  var lab = el("label", null, "Authority secret (hex) — private");
+  lab.appendChild(helpMarker("cfgRigSecret"));
+  wrap.appendChild(lab);
+  var row = el("div", "secretrow");
+  var input = el("input");
+  input.type = "password";
+  input.value = value;
+  input.placeholder = "64 hex characters — keep this secret";
+  input.classList.add("grow");
+  input.style.fontVariantNumeric = "tabular-nums";
+  var hint = el("div", "hintline", "");
+  input.addEventListener("input", function () { onInput(input.value, hint); });
+  var reveal = el("button", "btn tiny ghost revealbtn", "Show");
+  reveal.type = "button";
+  reveal.addEventListener("click", function () {
+    input.type = input.type === "password" ? "text" : "password";
+    reveal.textContent = input.type === "password" ? "Show" : "Hide";
+  });
+  row.appendChild(input);
+  row.appendChild(reveal);
+  wrap.appendChild(row);
+  wrap.appendChild(hint);
+  return { wrap: wrap, input: input, hint: hint };
+}
+
+// generateRigIdentity mints an identity server-side (the secret stays there)
+// and points the rig at the returned handle, so its public key shows at once.
+function generateRigIdentity(port) {
+  if (genInFlight[port]) return;
+  genInFlight[port] = true;
+  fetch("/authority/generate", { method: "POST" })
+    .then(function (r) { return r.json().then(function (o) { return { ok: r.ok, o: o }; }); })
+    .then(function (res) {
+      if (res.ok) {
+        stagedPub[res.o.handle] = res.o.publicKey;
+        var val = "__staged__:" + res.o.handle;
+        var st = rigIdStash[port] || (rigIdStash[port] = {});
+        st.set = val; st.lastMode = "set";
+        var rig = findRigByPort(port);
+        if (rig) rig.authoritySecret = val;
+      }
+    })
+    .catch(function () { /* leave the placeholder; a retry is a click away */ })
+    .then(function () { genInFlight[port] = false; renderConfigForm(); });
+}
+
+// enterRigSv2 chooses the identity state when a rig is switched to SV2,
+// restoring whatever it had before rather than always minting a new key.
+function enterRigSv2(rig) {
+  rig.protocol = "sv2";
+  var st = rigIdStash[rig.port] || {};
+  if (st.lastMode === "manual" && st.manual) rig.authoritySecret = st.manual;
+  else if (st.set) rig.authoritySecret = st.set;
+  else if (rigPubByPort[rig.port]) rig.authoritySecret = "__keep__";
+  else rig.authoritySecret = "__generating__";
+}
+
+// rigIdentitySection renders the SV2 identity editor for one rig.
+function rigIdentitySection(rig) {
+  var port = rig.port, sec = rig.authoritySecret;
+  var box = el("div", "f wide");
+  var st = rigIdStash[port] || (rigIdStash[port] = {});
+  // Keep the stash in step with the draft so a later switch can restore this.
+  if (isSetValue(sec)) { st.set = sec; st.lastMode = "set"; }
+  else if (sec !== "__generating__") { st.manual = sec || ""; st.lastMode = "manual"; }
+
+  if (sec === "__generating__") {
+    box.appendChild(el("div", "keyout muted", "Generating identity…"));
+    return box;
+  }
+  if (isSetValue(sec)) {
+    box.appendChild(rigKeyReadout(pubForSet(port, sec)));
+    var acts = el("div", "keyactions");
+    var regen = el("button", "btn tiny", "Regenerate");
+    regen.type = "button";
+    regen.addEventListener("click", function () { rig.authoritySecret = "__generating__"; renderConfigForm(); generateRigIdentity(port); });
+    var own = el("button", "btn tiny ghost", "Provide my own");
+    own.type = "button";
+    own.addEventListener("click", function () { rig.authoritySecret = st.manual || ""; renderConfigForm(); });
+    acts.appendChild(regen); acts.appendChild(own);
+    box.appendChild(acts);
+  } else {
+    var f = maskedSecretField(sec || "", function (v, hint) {
+      rig.authoritySecret = v.trim();
+      st.manual = rig.authoritySecret;
+      previewPub(rig.authoritySecret, hint);
+    });
+    box.appendChild(f.wrap);
+    var useGen = el("button", "btn tiny ghost", "Use a generated key instead");
+    useGen.type = "button";
+    useGen.addEventListener("click", function () {
+      if (st.set) { rig.authoritySecret = st.set; renderConfigForm(); }
+      else { rig.authoritySecret = "__generating__"; renderConfigForm(); generateRigIdentity(listen); }
+    });
+    box.appendChild(useGen);
+    if (sec) previewPub(sec, f.hint);
+  }
+  return box;
+}
+
+// checkAuthKey validates a pasted gateway authority (public) key server-side and
+// reports into a hint line. Debounced; runs as the operator types.
+// checkAuthKey validates a pasted authority key server-side and reports the
+// verdict in the hint. onResult (optional) is called with true/false whenever
+// the verdict settles, so a caller can gate a control -- the key-test button is
+// only enabled once the key actually parses.
+function checkAuthKey(key, hint, onResult) {
+  if (!hint) return;
+  clearTimeout(keyCheckTimer);
+  if (!key) {
+    hint.className = "hintline"; hint.textContent = "";
+    if (onResult) onResult(false);
+    return;
+  }
+  keyCheckTimer = setTimeout(async function () {
+    try {
+      var r = await fetch("/authority/checkkey", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: key })
+      });
+      var out = await r.json();
+      if (r.ok) { hint.className = "hintline ok"; hint.textContent = "Valid authority key."; if (onResult) onResult(true); }
+      else { hint.className = "hintline err"; hint.textContent = out.error || "not a valid authority key"; if (onResult) onResult(false); }
+    } catch (e) { hint.className = "hintline err"; hint.textContent = "could not check the key"; if (onResult) onResult(false); }
+  }, 500);
+}
+
+// probeAuthKey goes past "is this a valid key?" to "is this the RIGHT key?": it
+// asks the server to run the actual SV2 Noise handshake to the gateway with this
+// key pinned. Only the gateway's real authority key makes that handshake verify,
+// so a pass is proof the key belongs to the gateway -- not just that it parses.
+// The server dials and immediately drops the socket; no mining session is
+// touched. Three outcomes: verified (the key is the gateway's), reached-but-not
+// (a real negative -- wrong key or a bad validity window), and not-reached (the
+// gateway didn't answer, so the key is untested rather than disproven).
+async function probeAuthKey(pool, statusEl, btn) {
+  if (!statusEl) return;
+  statusEl.className = "hintline";
+  statusEl.textContent = "Testing against the gateway…";
+  if (btn) btn.disabled = true;
+  try {
+    var r = await fetch("/authority/probe", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host: pool.host, port: pool.port, key: pool.authorityKey })
+    });
+    var out = await r.json();
+    if (!r.ok) {
+      statusEl.className = "hintline err";
+      statusEl.textContent = out.error || "could not test the key";
+    } else if (out.verified) {
+      statusEl.className = "hintline ok";
+      statusEl.textContent = "✓ Verified — this is your gateway's authority key.";
+    } else if (out.reached) {
+      statusEl.className = "hintline err";
+      statusEl.textContent = "✗ " + (out.error || "the gateway is not using this key");
+    } else {
+      // Untested, not disproven -- say so plainly rather than colour it a failure.
+      statusEl.className = "hintline";
+      statusEl.textContent = "Couldn't reach the gateway: " + (out.error || "no response") + ". Key not tested.";
+    }
+  } catch (e) {
+    statusEl.className = "hintline err";
+    statusEl.textContent = "could not test the key";
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// previewPub asks the server for the PUBLIC half of a hand-typed secret and
+// writes it (or the error) into a field's hint line. Debounced, because it runs
+// on every keystroke of the secret field.
+function previewPub(secret, hintEl) {
+  if (!hintEl) return;
+  clearTimeout(pubPreviewTimer);
+  if (!secret) { hintEl.className = "hintline"; hintEl.textContent = ""; return; }
+  pubPreviewTimer = setTimeout(async function () {
+    try {
+      var r = await fetch("/authority/pubof", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ secret: secret })
+      });
+      var out = await r.json();
+      if (r.ok) {
+        hintEl.className = "hintline ok";
+        hintEl.textContent = "Pin this on your miner: " + out.publicKey;
+      } else {
+        hintEl.className = "hintline err";
+        hintEl.textContent = out.error || "invalid secret";
+      }
+    } catch (e) {
+      hintEl.className = "hintline err";
+      hintEl.textContent = "could not derive the public key";
+    }
+  }, 500);
 }
 
 function renderConfigForm() {
@@ -3481,23 +3961,21 @@ function renderConfigForm() {
       ceilHint = hint; checkDwell();
     }
   }));
-  tg.appendChild(field("Dashboard refresh (seconds)", draft.pollSeconds, {
+  tg.appendChild(field("Dashboard refresh (seconds)", draft.dashboardPollSeconds, {
     type: "number", help: "cfgPoll", min: 0,
     hint: "How often this page refetches. Floor 0.5.",
-    onInput: function (v) { draft.pollSeconds = v === "" ? "" : Number(v); }
+    onInput: function (v) { draft.dashboardPollSeconds = v === "" ? "" : Number(v); }
   }));
   tg.appendChild(field("Gateway check (seconds)", draft.gatewayPollSeconds, {
     type: "number", help: "cfgGatewayPoll", min: 5,
     hint: "How often each gateway's status page is read.",
     onInput: function (v) { draft.gatewayPollSeconds = v === "" ? "" : Number(v); }
   }));
-  tg.appendChild(field(
-    isWildcard(draft.statusListen) ? "Dashboard port" : "Dashboard address",
-    listenDisplay(draft.statusListen), {
-      help: "cfgStatusListen", mono: true,
-      hint: "Changing this moves the page you are on.",
-      onInput: function (v) { draft.statusListen = v.trim(); }
-    }));
+  tg.appendChild(field("Dashboard port", draft.dashboardPort, {
+    type: "number", help: "cfgDashboardPort", mono: true, min: 1,
+    hint: "Served on every interface. Changing this moves the page you are on.",
+    onInput: function (v) { draft.dashboardPort = v === "" ? "" : parseInt(v, 10) || 0; }
+  }));
   timing.appendChild(tg);
   body.appendChild(timing);
 
@@ -3535,10 +4013,29 @@ function renderConfigForm() {
     //
     // A hand-written config.json can still say whatever it likes; the file
     // stays the source of truth, and whatever it says is what appears here.
-    grid.appendChild(field("Port", listenDisplay(rig.listen), {
-      wide: true, help: "cfgRigListen", mono: true, readOnly: true,
-      big: true, placeholder: "assigned on save"
-    }));
+    // Port, with the protocol selector beside it rather than on its own row.
+    // SV2 makes switchyard the Noise SERVER for this rig, which needs an
+    // identity -- so choosing it pulls in the identity section below.
+    var portField = field("Port", rig.port, {
+      help: "cfgRigPort", mono: true, readOnly: true, big: true,
+      placeholder: "assigned on save"
+    });
+    grid.appendChild(fieldRow(portField, protoField("Protocol",
+      rig.protocol === "sv2" ? "sv2" : "sv1", "cfgRigProtocol", function (p) {
+        if (p === "sv2") {
+          enterRigSv2(rig);
+          renderConfigForm();
+          if (rig.authoritySecret === "__generating__") generateRigIdentity(rig.port);
+        } else {
+          rig.protocol = "sv1";
+          delete rig.authoritySecret;
+          renderConfigForm();
+        }
+      })));
+
+    if (rig.protocol === "sv2") {
+      grid.appendChild(rigIdentitySection(rig));
+    }
 
     card.appendChild(grid);
     rigWrap.appendChild(card);
@@ -3546,8 +4043,12 @@ function renderConfigForm() {
   var addRig = el("button", "btn tiny add", "Add rig");
   addRig.type = "button";
   addRig.addEventListener("click", async function () {
-    draft.rigs.push({ listen: await suggestPort() });
+    // New rigs default to SV2 -- a gentle nudge toward the better wire -- and
+    // mint their identity immediately so the public key is there to copy.
+    var port = await suggestPort();
+    draft.rigs.push({ port: port, protocol: "sv2", authoritySecret: "__generating__" });
     renderConfigForm();
+    if (port) generateRigIdentity(port);
   });
   var addRow = el("div", "addrow");
   addRow.appendChild(addRig);
@@ -3577,6 +4078,9 @@ function renderConfigForm() {
     var grid = el("div", "fgrid");
 
     var nameField, nameInput, statusHint, stratumHint;
+    // Set by the SV2 block to its button-enabler, so the stratum-port field can
+    // re-evaluate the key-test button when the port changes. Null for SV1 pools.
+    var refreshProbe = null;
 
     // The pool's name is FETCHED, never typed.
     //
@@ -3603,7 +4107,8 @@ function renderConfigForm() {
           body: JSON.stringify({
             host: pool.host || "127.0.0.1",
             statusPort: pool.statusPort,
-            port: pool.port
+            port: pool.port,
+            protocol: pool.protocol || "sv1"
           })
         }).then(function (r) { return r.json(); });
 
@@ -3661,7 +4166,11 @@ function renderConfigForm() {
           verdict(statusHint, "Status page", false, res.statusError);
         }
         verdict(stratumHint, "Stratum port", res.stratumOK,
-          res.stratumOK ? "answered a subscribe on " + pool.port : res.stratumError);
+          res.stratumOK
+            ? (pool.protocol === "sv2"
+                ? "answered the SV2 handshake on " + pool.port
+                : "answered a subscribe on " + pool.port)
+            : res.stratumError);
       } catch (e) {
         verdict(statusHint, "Status page", false, String(e));
         verdict(stratumHint, "Stratum port", false, "not checked");
@@ -3678,10 +4187,72 @@ function renderConfigForm() {
       line.appendChild(document.createTextNode(" \u00b7 " + detail));
     }
 
-    grid.appendChild(field("Gateway host", pool.host, {
-      wide: true, placeholder: "127.0.0.1", help: "cfgPoolHost", mono: true,
+    // Gateway host, with the protocol selector beside it. SV2 makes switchyard
+    // the Noise CLIENT, so here it pins the gateway's PUBLIC key -- the inverse
+    // of the rig side, where switchyard holds a secret and hands out its public.
+    var hostField = field("Gateway host", pool.host, {
+      placeholder: "127.0.0.1", help: "cfgPoolHost", mono: true,
       onInput: function (v) { pool.host = v.trim(); scheduleTag(); }
-    }));
+    });
+    grid.appendChild(fieldRow(hostField, protoField("Protocol",
+      pool.protocol === "sv2" ? "sv2" : "sv1", "cfgPoolProtocol", function (p) {
+        if (p === "sv2") {
+          pool.protocol = "sv2";
+          if (poolKeyStash[i]) pool.authorityKey = poolKeyStash[i];
+        } else {
+          pool.protocol = "sv1";
+          if (pool.authorityKey) poolKeyStash[i] = pool.authorityKey;
+          delete pool.authorityKey;
+        }
+        renderConfigForm();
+      })));
+    if (pool.protocol === "sv2") {
+      // The live test only makes sense once the key actually parses, so the
+      // button is gated on the SAME server-side check that drives the hint --
+      // not merely on the field being non-empty. keyValid tracks that verdict.
+      var probeBtn = el("button", "btn tiny", "Test this key against the gateway");
+      probeBtn.type = "button";
+      probeBtn.style.alignSelf = "flex-start";
+      probeBtn.disabled = true;
+      var probeStatus = el("div", "hintline");
+      var keyValid = false;
+      refreshProbe = function () {
+        var ok = keyValid && !!pool.port;
+        probeBtn.disabled = !ok;
+        probeBtn.title = ok ? "" : "Enter a valid authority key and the stratum port first.";
+      };
+      probeBtn.addEventListener("click", function () { probeAuthKey(pool, probeStatus, probeBtn); });
+
+      var akField = field("Gateway authority key (public)", pool.authorityKey || "", {
+        wide: true, mono: true, help: "cfgPoolAuthKey",
+        placeholder: "the authority key the gateway prints",
+        onInput: function (v, input, hint) {
+          pool.authorityKey = v.trim();
+          poolKeyStash[i] = pool.authorityKey;
+          checkAuthKey(pool.authorityKey, hint, function (valid) { keyValid = valid; refreshProbe(); });
+        }
+      });
+      grid.appendChild(akField);
+      grid.appendChild(el("div", "f wide fieldnote",
+        "This is your gateway's OWN public key, not a secret — switchyard pins "
+        + "it so it only talks to your gateway. Find it where your DATUM gateway "
+        + "prints it (its authority public key in the gateway config, or its "
+        + "startup log) and paste it exactly."));
+
+      var probeWrap = el("div", "f wide");
+      probeWrap.appendChild(probeBtn);
+      probeWrap.appendChild(probeStatus);
+      grid.appendChild(probeWrap);
+
+      // Seed both the hint and the button's enabled state from whatever key is
+      // already on the card.
+      if (pool.authorityKey) {
+        checkAuthKey(pool.authorityKey, akField.querySelector(".hintline"),
+          function (valid) { keyValid = valid; refreshProbe(); });
+      } else {
+        refreshProbe();
+      }
+    }
 
     // Three short fields on one line beneath the host. They belong together --
     // two ports on that host and the name it reports back -- and stacking them
@@ -3691,7 +4262,12 @@ function renderConfigForm() {
 
     var portField = field("Stratum port", pool.port, {
       type: "number", placeholder: "23334", help: "cfgPoolPort", mono: true, narrow: true,
-      onInput: function (v) { pool.port = parseInt(v, 10) || 0; scheduleTag(); }
+      onInput: function (v) {
+        pool.port = parseInt(v, 10) || 0;
+        scheduleTag();
+        // The key-test button needs the port too, so re-evaluate it here.
+        if (refreshProbe) refreshProbe();
+      }
     });
     trio.appendChild(portField);
 
@@ -3749,7 +4325,9 @@ function renderConfigForm() {
   var addPool = el("button", "btn tiny add", "Add pool");
   addPool.type = "button";
   addPool.addEventListener("click", function () {
-    draft.pools.push({ host: "127.0.0.1" });
+    // New pools default to SV2, the same nudge the rigs get; the authority-key
+    // field appears so the operator can paste the gateway's key (or switch back).
+    draft.pools.push({ host: "127.0.0.1", protocol: "sv2" });
     renderConfigForm();
   });
   poolAdds.appendChild(addPool);
@@ -3763,7 +4341,10 @@ function renderConfigForm() {
   addSolo.disabled = hasSolo;
   if (hasSolo) addSolo.title = "Only one solo gateway. Remove the existing one to add another.";
   addSolo.addEventListener("click", function () {
-    draft.pools.push({ host: "127.0.0.1", solo: true });
+    // Same SV2 nudge the Add-pool button gives: a solo gateway speaks the same
+    // wire to switchyard as a pooled one, so it defaults to SV2 too (switch back
+    // to SV1 on the card if the gateway isn't configured for it).
+    draft.pools.push({ host: "127.0.0.1", solo: true, protocol: "sv2" });
     renderConfigForm();
   });
   poolAdds.appendChild(addSolo);
@@ -3847,13 +4428,13 @@ function checkDwell() {
 // form has already pencilled in. Returns "" if nothing is free, which still
 // leaves a usable (blank) field.
 async function suggestPort() {
-  var taken = draft.rigs.map(function (r) { return portOf(r.listen); }).filter(Boolean);
+  var taken = draft.rigs.map(function (r) { return r.port; }).filter(Boolean);
   try {
     var res = await fetch("/ports/suggest?taken=" + encodeURIComponent(taken.join(",")))
       .then(function (r) { return r.json(); });
-    if (res.ok) return String(res.port);
+    if (res.ok) return res.port;
   } catch (e) { /* a suggestion is a convenience, not a requirement */ }
-  return "";
+  return 0;
 }
 
 // checkPort asks the server whether an address can actually be bound.
@@ -3870,7 +4451,7 @@ function checkPort(value, input, hint) {
       var res = await fetch("/ports/probe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ listen: value })
+        body: JSON.stringify({ port: parseInt(value, 10) || 0 })
       }).then(function (r) { return r.json(); });
       if (res.ok) {
         hint.className = "hintline ok";
@@ -3896,6 +4477,7 @@ async function openConfig(firstRun) {
   try {
     var res = await fetch("/config").then(function (r) { return r.json(); });
     draft = res.config || {};
+    rigPubByPort = res.rigAuthorityPub || {};
     draftPath = res.path || draftPath;
   } catch (e) {
     msg.className = "msg err";
@@ -3923,14 +4505,18 @@ async function openConfig(firstRun) {
   draft.pools = draft.pools || [];
   draft.rigs = draft.rigs || [];
   if (firstRun) {
-    if (!draft.pools.length) draft.pools.push({ name: "", addr: "" });
+    // Seed with one valid pool and one valid rig (the same shapes the Add
+    // buttons produce), both defaulting to SV2 -- never the old name/addr/user
+    // placeholders, which the strict decoder would reject on save.
+    if (!draft.pools.length) draft.pools.push({ host: "127.0.0.1", protocol: "sv2" });
     if (!draft.rigs.length) {
-      var listen = "";
+      var seedPort = 0;
       try {
         var sug = await fetch("/ports/suggest").then(function (r) { return r.json(); });
-        if (sug.ok) listen = sug.listen;
+        if (sug.ok) seedPort = sug.port;
       } catch (e) { /* blank is still usable */ }
-      draft.rigs.push({ name: "", listen: listen, user: "", pass: "x" });
+      draft.rigs.push({ port: seedPort, protocol: "sv2", authoritySecret: "__generating__" });
+      if (seedPort) generateRigIdentity(seedPort);
     }
   }
   renderConfigForm();
@@ -4140,18 +4726,52 @@ var HELP_TEXT = {
     + "<p>It is self-reported, so check it: <span class=\"k\">ss -tp</span> or "
     + "<span class=\"k\">netstat -ano</span> should match exactly.</p>",
 
-  cfgRigListen:
+  cfgRigPort:
     "<p>The port to point this miner at. Switchyard assigns it from 23401 "
     + "upwards and it does not change.</p>"
     + "<p>Configure the miner exactly as you would to reach the pool directly; "
     + "its worker name and password arrive on the connection and are forwarded "
     + "unchanged.</p>",
 
-  cfgStatusListen:
+  cfgRigProtocol:
+    "<p>How this miner speaks to switchyard. <b>SV1</b> is classic Stratum and "
+    + "needs nothing extra. <b>SV2</b> is the encrypted, authenticated wire.</p>"
+    + "<p>For SV2, switchyard is the server, so it holds an <i>authority "
+    + "secret</i> for this port and hands you the matching public key to pin on "
+    + "the miner. Generate one here, or paste your own.</p>",
+
+  cfgRigSecret:
+    "<p>switchyard's own 32-byte authority <b>secret</b> for this SV2 port, as 64 "
+    + "hex characters — a PRIVATE key. Keep it secret; its public half is what "
+    + "you pin on the miner.</p>"
+    + "<p>Only paste one if you would rather supply your own than have switchyard "
+    + "generate it. It is written to config.json and, once saved, is never shown "
+    + "here again.</p>",
+
+  rigAuthorityKey:
+    "<p>switchyard's PUBLIC authority key for this SV2 port. It is safe to share "
+    + "— it is the public half, never the secret.</p>"
+    + "<p>To mine SV2, configure your miner (or its SV2 translator) to pin this "
+    + "key. It is how the miner authenticates switchyard over the Noise handshake; "
+    + "without it, the connection is refused.</p>",
+
+  cfgPoolProtocol:
+    "<p>How switchyard reaches this gateway. <b>SV1</b> is classic Stratum. "
+    + "<b>SV2</b> is the encrypted, authenticated wire.</p>"
+    + "<p>For SV2, switchyard is the client, so here it pins the gateway's own "
+    + "public authority key — the inverse of the rig side.</p>",
+
+  cfgPoolAuthKey:
+    "<p>The gateway's SV2 authority <b>public</b> key, in the form the gateway "
+    + "prints (“configure this on miners”).</p>"
+    + "<p>switchyard pins it to confirm every SV2 session is with your gateway "
+    + "and not something that has taken its address. Required for an SV2 pool.</p>",
+
+  cfgDashboardPort:
     "<p>The port this dashboard is served on. Changing it moves the page you "
     + "are looking at.</p>"
-    + "<p>A bare port listens on every interface. For local only, put "
-    + "<span class=\"k\">127.0.0.1:7160</span> in the file.</p>"
+    + "<p>It is always served on every interface, so another device on the "
+    + "network can reach it at this port.</p>"
     + "<p>There is no authentication here, and this page can rewrite the "
     + "config.</p>",
 

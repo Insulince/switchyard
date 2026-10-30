@@ -16,6 +16,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/Insulince/switchyard/sv2/noise"
 )
 
 // server is the dashboard, and it is the one thing that OUTLIVES a reload.
@@ -55,10 +57,42 @@ type server struct {
 	// on the coordinator for the same reason the server is: it outlives a
 	// reload, and so does a dashboard's subscription to it.
 	feed *shareFeed
+
+	// staged holds SV2 authority secrets the editor has generated but not yet
+	// saved, keyed by an opaque handle. The browser is handed the handle and the
+	// matching PUBLIC key; the private secret stays HERE until a save resolves it
+	// into config.json, so a generated secret never reaches the browser. Unsaved
+	// ones are discarded on restart -- no harm, nothing references them. On s
+	// (not the coordinator) because, like feed, it must outlive a reload.
+	stagedMu sync.Mutex
+	staged   map[string]string
 }
 
 func newServer(path string) *server {
-	return &server{path: path, reloadC: make(chan struct{}, 1), feed: newShareFeed()}
+	return &server{path: path, reloadC: make(chan struct{}, 1), feed: newShareFeed(), staged: map[string]string{}}
+}
+
+// stageSecret stores a freshly minted authority secret under a new handle and
+// returns the handle. The secret waits here, off the browser, until a save
+// resolves it.
+func (s *server) stageSecret(secret string) string {
+	h := randomHex(16)
+	s.stagedMu.Lock()
+	s.staged[h] = secret
+	s.stagedMu.Unlock()
+	return h
+}
+
+// consumeStaged returns the secret for a handle and removes it, so a staged
+// secret is spent once -- by the save that resolves it -- and does not pile up.
+func (s *server) consumeStaged(handle string) (string, bool) {
+	s.stagedMu.Lock()
+	defer s.stagedMu.Unlock()
+	sec, ok := s.staged[handle]
+	if ok {
+		delete(s.staged, handle)
+	}
+	return sec, ok
 }
 
 // swap installs a newly built coordinator. Called once at boot and once per
@@ -210,6 +244,30 @@ func mustPost(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
+// requireJSONBody is a CSRF guard: it rejects a request whose Content-Type is not
+// application/json. A cross-site <form> can only send text/plain, urlencoded or
+// multipart, and a cross-site fetch that sets application/json triggers a CORS
+// preflight this origin never answers -- so only the dashboard's own page reaches
+// a guarded endpoint. It matters most where the handler dials a caller-supplied
+// host (the gateway probes), which would otherwise be an SSRF reachable by CSRF.
+func requireJSONBody(w http.ResponseWriter, r *http.Request) bool {
+	ct := r.Header.Get("Content-Type")
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i]
+	}
+	if strings.TrimSpace(ct) != "application/json" {
+		http.Error(w, "Content-Type: application/json required", http.StatusUnsupportedMediaType)
+		return false
+	}
+	return true
+}
+
+// mustPostJSON requires a POST carrying a JSON body: the method check plus the
+// CSRF guard above. Used by every endpoint that decodes a JSON body.
+func mustPostJSON(w http.ResponseWriter, r *http.Request) bool {
+	return mustPost(w, r) && requireJSONBody(w, r)
+}
+
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
 
@@ -280,16 +338,181 @@ func (s *server) routes() http.Handler {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 				return
 			}
+			// A browser has no business holding switchyard's own SV2 secrets, so
+			// this is the one place the GET is a projection rather than the file
+			// verbatim: each sv2 rig's authoritySecret is replaced by the __keep__
+			// sentinel (the editor sends it back unchanged to preserve the secret,
+			// never seeing it), and the PUBLIC half -- the part an operator pins on
+			// a miner -- is handed over separately. A pool's authorityKey is
+			// already public, so it is returned as-is.
+			redacted := cfg
+			redacted.Rigs = append([]rigConfig(nil), cfg.Rigs...)
+			rigPub := map[string]string{}
+			for i := range redacted.Rigs {
+				if redacted.Rigs[i].proto() != "sv2" || redacted.Rigs[i].AuthoritySecret == "" {
+					continue
+				}
+				if priv, err := redacted.Rigs[i].authorityPriv(); err == nil {
+					rigPub[strconv.Itoa(redacted.Rigs[i].Port)] = authorityKeyEncode(priv.PubKey())
+				}
+				redacted.Rigs[i].AuthoritySecret = authSecretKeep
+			}
 			writeJSON(w, http.StatusOK, map[string]any{
-				"config":     cfg,
-				"configured": cfg.configured(),
-				"path":       s.path,
+				"config":          redacted,
+				"configured":      cfg.configured(),
+				"path":            s.path,
+				"rigAuthorityPub": rigPub,
 			})
 		case http.MethodPost:
+			if !requireJSONBody(w, r) {
+				return
+			}
 			s.saveAndReload(w, r)
 		default:
 			w.Header().Set("Allow", "GET, POST")
 			http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
+		}
+	})
+
+	// Derive the PUBLIC half of an SV2 authority secret the operator typed into
+	// the editor, so the page can show the key to pin on a miner without doing
+	// crypto in the browser. The secret is one the operator is supplying anyway
+	// -- it is on its way into config.json -- so echoing its public half back
+	// leaks nothing the save itself would not.
+	mux.HandleFunc("/authority/pubof", func(w http.ResponseWriter, r *http.Request) {
+		if !mustPostJSON(w, r) {
+			return
+		}
+		var body struct {
+			Secret string `json:"secret"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request body"})
+			return
+		}
+		priv, err := authoritySecretDecode(body.Secret)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"publicKey": authorityKeyEncode(priv.PubKey())})
+	})
+
+	// Mint a fresh SV2 authority identity for the editor and STAGE it: the secret
+	// stays server-side under a handle, and only the handle and the PUBLIC key go
+	// back, so a generated private key never reaches the browser. The handle
+	// rides in the rig's authoritySecret as "__staged__:<handle>" until a save
+	// resolves it (saveAndReload) or the process restarts and discards it.
+	mux.HandleFunc("/authority/generate", func(w http.ResponseWriter, r *http.Request) {
+		if !mustPost(w, r) {
+			return
+		}
+		secret, err := newAuthoritySecret()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		priv, err := authoritySecretDecode(secret)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"handle":    s.stageSecret(secret),
+			"publicKey": authorityKeyEncode(priv.PubKey()),
+		})
+	})
+
+	// Validate a gateway authority PUBLIC key the operator pasted, decoding it
+	// exactly as switchyard will when it dials the gateway, so the editor can
+	// warn about a malformed key before a save would reject it. Public in,
+	// public out.
+	mux.HandleFunc("/authority/checkkey", func(w http.ResponseWriter, r *http.Request) {
+		if !mustPostJSON(w, r) {
+			return
+		}
+		var body struct {
+			Key string `json:"key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request body"})
+			return
+		}
+		if _, err := authorityKeyDecode(body.Key); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+
+	// Prove a pasted gateway authority key is the RIGHT one, not merely
+	// well-formed (that is /authority/checkkey). There is no "ask the gateway
+	// for its key" request in SV2 -- the key is never sent in the clear. The
+	// only thing that confirms it is completing the handshake switchyard would
+	// run in production: dial the gateway's stratum port as the Noise initiator
+	// with this key pinned, and see whether the gateway's certificate verifies
+	// under it. It does only if the gateway's real authority key is this one.
+	//
+	// This is exactly sv2Upstream.run's first step and nothing more: the socket
+	// is dropped the instant the handshake resolves, so no channel is opened and
+	// no mining session is touched. Done by the SERVER because the gateway is
+	// often on a network only this process can reach.
+	mux.HandleFunc("/authority/probe", func(w http.ResponseWriter, r *http.Request) {
+		if !mustPostJSON(w, r) {
+			return
+		}
+		var body struct {
+			Host string `json:"host"`
+			Port int    `json:"port"`
+			Key  string `json:"key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request body"})
+			return
+		}
+		pub, err := authorityKeyDecode(body.Key)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if body.Port <= 0 || body.Port > 65535 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "set the stratum port first"})
+			return
+		}
+		// Build the address with the same helper production dials through, so the
+		// probe reaches exactly where a live SV2 session would.
+		addr := poolConfig{Host: body.Host, Port: body.Port}.stratumAddr()
+		conn, _, err := sv2DialInitiator(addr, pub, 8*time.Second)
+		if err == nil {
+			// Verified: the gateway's certificate validated under this key. Drop
+			// the socket at once -- we were only ever asking a yes/no question.
+			_ = conn.Close()
+			writeJSON(w, http.StatusOK, map[string]any{"verified": true, "reached": true})
+			return
+		}
+		switch {
+		case errors.Is(err, noise.ErrCertSignatureInvalid):
+			// A real SV2 gateway answered and its certificate decrypted -- the
+			// signature just did not validate under this key. The key is wrong.
+			writeJSON(w, http.StatusOK, map[string]any{
+				"verified": false, "reached": true,
+				"error": "the gateway is using a different authority key than this one",
+			})
+		case errors.Is(err, noise.ErrCertWindow):
+			// Reached the gateway, but its certificate's validity window is
+			// checked before the signature, so the key could not be confirmed.
+			// This is almost always a clock, not a wrong key.
+			writeJSON(w, http.StatusOK, map[string]any{
+				"verified": false, "reached": true, "window": true,
+				"error": "the gateway's certificate is outside its validity window (check the clocks); the key could not be confirmed",
+			})
+		default:
+			// Never got a certificate to check: a dial failure, or something on
+			// that port that is not an SV2 gateway. The key was not tested.
+			writeJSON(w, http.StatusOK, map[string]any{
+				"verified": false, "reached": false,
+				"error": shortReachError(err, body.Port),
+			})
 		}
 	})
 
@@ -298,21 +521,25 @@ func (s *server) routes() http.Handler {
 	// HERE rather than guessed at in the browser -- a page has no way to find
 	// out whether a port on the host is free.
 	mux.HandleFunc("/ports/probe", func(w http.ResponseWriter, r *http.Request) {
-		if !mustPost(w, r) {
+		if !mustPostJSON(w, r) {
 			return
 		}
 		var body struct {
-			Listen string `json:"listen"`
+			Port int `json:"port"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request body"})
 			return
 		}
-		addr := normaliseListen(body.Listen)
+		if body.Port <= 0 || body.Port > 65535 {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "not a valid port"})
+			return
+		}
+		addr := fmt.Sprintf("0.0.0.0:%d", body.Port)
 		// A port this switchyard is already listening on is not "taken" in
 		// any sense the operator cares about -- it is theirs. Saying
 		// "address in use" about your own rig's port would be nonsense.
-		if _, cfg := s.current(); addrInUseByUs(cfg, addr) {
+		if _, cfg := s.current(); addrInUseByUs(cfg, body.Port) {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mine": true})
 			return
 		}
@@ -334,13 +561,14 @@ func (s *server) routes() http.Handler {
 	// network only this process can reach, and a page cannot read a response
 	// from another origin anyway.
 	mux.HandleFunc("/gateway/inspect", func(w http.ResponseWriter, r *http.Request) {
-		if !mustPost(w, r) {
+		if !mustPostJSON(w, r) {
 			return
 		}
 		var body struct {
 			Host       string `json:"host"`
 			StatusPort int    `json:"statusPort"`
 			Port       int    `json:"port"`
+			Protocol   string `json:"protocol"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request body"})
@@ -381,7 +609,15 @@ func (s *server) routes() http.Handler {
 			out["stratumOK"] = false
 			out["stratumError"] = "same as the status port"
 		default:
-			if err := probeStratum(r.Context(), probe.stratumAddr()); err != nil {
+			// Protocol-aware: the two wires are incompatible, so an SV2 gateway
+			// must be probed with the SV2 handshake, not an SV1 subscribe. Using
+			// the wrong one is exactly what reported a live SV2 gateway as "not a
+			// stratum server".
+			probeFn := probeStratum
+			if body.Protocol == "sv2" {
+				probeFn = probeStratumSV2
+			}
+			if err := probeFn(r.Context(), probe.stratumAddr()); err != nil {
 				out["stratumOK"] = false
 				out["stratumError"] = err.Error()
 			} else {
@@ -399,11 +635,7 @@ func (s *server) routes() http.Handler {
 		_, cfg := s.current()
 		taken := map[int]bool{}
 		for _, rig := range cfg.Rigs {
-			if _, p, err := net.SplitHostPort(rig.Listen); err == nil {
-				if n, err := strconv.Atoi(p); err == nil {
-					taken[n] = true
-				}
-			}
+			taken[rig.Port] = true
 		}
 		// Extra ports the caller already has pencilled into an unsaved form.
 		for _, raw := range strings.Split(r.URL.Query().Get("taken"), ",") {
@@ -416,9 +648,7 @@ func (s *server) routes() http.Handler {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": true, "port": port, "listen": fmt.Sprintf("0.0.0.0:%d", port),
-		})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "port": port})
 	})
 
 	return mux
@@ -431,9 +661,9 @@ func (s *server) routes() http.Handler {
 // pointed at whatever ends up in the config, not at this.
 const defaultRigPortBase = 23401
 
-func addrInUseByUs(cfg config, addr string) bool {
+func addrInUseByUs(cfg config, port int) bool {
 	for _, r := range cfg.Rigs {
-		if normaliseListen(r.Listen) == addr {
+		if r.Port == port {
 			return true
 		}
 	}
@@ -453,23 +683,6 @@ func browseURL(addr string) string {
 		host = "localhost"
 	}
 	return "http://" + net.JoinHostPort(host, port) + "/"
-}
-
-// normaliseListen turns the forms an operator will actually type into a listen
-// address. A bare port is by far the most common thing to type, and refusing
-// it would be pedantry.
-func normaliseListen(v string) string {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return ""
-	}
-	if !strings.Contains(v, ":") {
-		return "0.0.0.0:" + v
-	}
-	if strings.HasPrefix(v, ":") {
-		return "0.0.0.0" + v
-	}
-	return v
 }
 
 // saveAndReload is the only path that changes the running system.
@@ -497,10 +710,8 @@ func (s *server) saveAndReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for i := range incoming.Rigs {
-		incoming.Rigs[i].Listen = normaliseListen(incoming.Rigs[i].Listen)
-	}
-	incoming.StatusListen = normaliseListen(incoming.StatusListen)
+	// Rig ports and the dashboard port are plain integers now -- nothing to
+	// normalise, and validate rejects a port out of range.
 	// Raw values first. applyDefaults treats anything <= 0 as "not set" and
 	// substitutes a default, which is right for an omitted field in a file and
 	// wrong for a number somebody typed -- a dwell floor of -5 would quietly
@@ -511,6 +722,35 @@ func (s *server) saveAndReload(w http.ResponseWriter, r *http.Request) {
 	}
 	incoming.applyDefaults()
 
+	// Turn the editor's SV2 identity references into real secrets BEFORE
+	// validation. Staged (in-screen generated) handles first: swap each
+	// "__staged__:<handle>" for the secret parked server-side, consuming it. A
+	// missing handle means the process restarted since it was generated -- the
+	// secret is gone, so the operator must regenerate rather than save a key
+	// whose public half they may already have pinned on a miner.
+	for i := range incoming.Rigs {
+		sec := incoming.Rigs[i].AuthoritySecret
+		if !strings.HasPrefix(sec, stagedPrefix) {
+			continue
+		}
+		real, ok := s.consumeStaged(strings.TrimPrefix(sec, stagedPrefix))
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": fmt.Sprintf("rig on port %d: its generated SV2 identity expired (switchyard restarted); "+
+					"open the editor and regenerate it", incoming.Rigs[i].Port),
+			})
+			return
+		}
+		incoming.Rigs[i].AuthoritySecret = real
+	}
+	// Then the __keep__ / __generate__ sentinels, using the running config as the
+	// source of any "keep" secret. After this, validate sees real secrets only.
+	_, running := s.current()
+	if err := resolveRigIdentities(&incoming, running); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
 	if err := incoming.validate(); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -519,15 +759,14 @@ func (s *server) saveAndReload(w http.ResponseWriter, r *http.Request) {
 	// Bind-check every rig port before committing anything. A config that
 	// parses perfectly and cannot listen is still a config that leaves miners
 	// with nowhere to connect, and it is far better to refuse the form than to
-	// write a file that breaks the next boot too.
-	_, running := s.current()
+	// write a file that breaks the next boot too. (running was read above.)
 	for _, rig := range incoming.Rigs {
-		if addrInUseByUs(running, rig.Listen) {
+		if addrInUseByUs(running, rig.Port) {
 			continue
 		}
-		if err := probeListen(rig.Listen); err != nil {
+		if err := probeListen(rig.listenAddr()); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": fmt.Sprintf("rig cannot listen on %s: %v", rig.Listen, err),
+				"error": fmt.Sprintf("rig cannot listen on port %d: %v", rig.Port, err),
 			})
 			return
 		}
@@ -551,11 +790,10 @@ func (s *server) saveAndReload(w http.ResponseWriter, r *http.Request) {
 	//
 	// Unchanged means already ours: listen() returns early without rebinding,
 	// so probing it would only discover that we are holding it.
-	if incoming.StatusListen != "" &&
-		incoming.StatusListen != normaliseListen(running.StatusListen) {
-		if err := probeListen(incoming.StatusListen); err != nil {
+	if incoming.DashboardPort != running.DashboardPort {
+		if err := probeListen(incoming.dashboardAddr()); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": fmt.Sprintf("the dashboard cannot listen on %s: %v", incoming.StatusListen, err),
+				"error": fmt.Sprintf("the dashboard cannot listen on port %d: %v", incoming.DashboardPort, err),
 			})
 			return
 		}

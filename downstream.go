@@ -34,7 +34,7 @@ type rigSession struct {
 	co     *coordinator
 	conn   net.Conn
 	w      *connWriter
-	up     *upstream
+	up     poolLink
 
 	once sync.Once
 	done chan struct{}
@@ -74,6 +74,33 @@ func (s *rigSession) claimedUserSafe() string {
 	defer s.mu.Unlock()
 	return s.claimedUser
 }
+
+// downstreamSession is what the coordinator needs from a bound miner session to
+// rotate it, attribute the gap it leaves, and render it -- regardless of whether
+// the miner speaks SV1 (*rigSession) or SV2 (*sv2RigSession). Everything the
+// coordinator does with a session goes through this, so the rotation scheme and
+// the dashboard are blind to the downstream protocol, just as they are to the
+// upstream one through poolLink.
+//
+// markRotated and rotatedByUs are read and written under the coordinator's mutex
+// (the same discipline the *rigSession.rotated field always had), not the
+// session's own lock.
+type downstreamSession interface {
+	close()
+	doneChan() <-chan struct{} // closed when the session has ended
+	boundLink() poolLink       // the pool link it is bound to, or nil
+	label() string             // the miner's own worker name, or ""
+	markRotated()              // switchyard is closing this to rotate it
+	rotatedByUs() bool         // read the attribution
+}
+
+var _ downstreamSession = (*rigSession)(nil)
+
+func (s *rigSession) doneChan() <-chan struct{} { return s.done }
+func (s *rigSession) boundLink() poolLink       { return s.up }
+func (s *rigSession) label() string             { return s.claimedUserSafe() }
+func (s *rigSession) markRotated()              { s.rotated = true }
+func (s *rigSession) rotatedByUs() bool         { return s.rotated }
 
 func newRigSession(co *coordinator, rig rigConfig, rigIdx int, conn net.Conn) *rigSession {
 	return &rigSession{
@@ -138,7 +165,7 @@ func (s *rigSession) run() {
 	// A connection that never subscribes is not a miner, so it never gets to
 	// displace one.
 	var (
-		up       *upstream
+		up       poolLink
 		en1      string
 		en2      int
 		attached bool
@@ -183,7 +210,8 @@ func (s *rigSession) run() {
 		case "mining.configure":
 			// Replay only what our upstream session actually negotiated.
 			// Claiming an extension the upstream does not hold would make the
-			// gateway reject every share -- see VersionRollingMask.
+			// gateway reject every share. switchyard never negotiates version
+			// rolling upstream (see upstream.handshake), so this is always false.
 			res := `{"version-rolling":false}`
 			if peek, ok := s.co.upstreamForRig(s.rigIdx); ok {
 				if granted := peek.grantedConfigure(); len(granted) > 0 {
@@ -226,13 +254,13 @@ func (s *rigSession) run() {
 				}
 				e1, e2, _, ok := chosen.attach(s)
 				if !ok {
-					s.logf("gateway %s went away during bind; dropping connection", chosen.pool.displayName())
+					s.logf("gateway %s went away during bind; dropping connection", chosen.displayName())
 					return
 				}
 				up, en1, en2, attached = chosen, e1, e2, true
 				s.up = chosen
 				s.co.setSession(s.rigIdx, s)
-				s.logf("bound to %s (extranonce1=%s)", chosen.pool.displayName(), en1)
+				s.logf("bound to %s (extranonce1=%s)", chosen.displayName(), en1)
 				// Real miner: the pre-subscribe guard has done its job.
 				_ = s.conn.SetReadDeadline(time.Time{})
 			}
@@ -300,7 +328,7 @@ func (s *rigSession) run() {
 				break
 			}
 			if err := up.submit(s, m.ID, m.Params); err != nil {
-				s.logf("submit to %s failed: %v", up.pool.displayName(), err)
+				s.logf("submit to %s failed: %v", up.displayName(), err)
 				s.send([]byte(fmt.Sprintf(
 					`{"id":%s,"result":null,"error":[20,"upstream unavailable",null]}`, rawID(m.ID))))
 			}
@@ -330,19 +358,31 @@ func (s *rigSession) run() {
 	}
 }
 
-// serveRig accepts miner connections on one rig's dedicated port.
+// serveRig accepts miner connections on one rig's dedicated port, dispatching on
+// the protocol the rig speaks to switchyard. The SV1 body is unchanged; an SV2
+// rig is served by a separate Noise-terminating session (sv2downstream.go).
+func serveRig(ctx context.Context, co *coordinator, rigIdx int) error {
+	switch co.cfg.Rigs[rigIdx].proto() {
+	case "sv2":
+		return serveRigSV2(ctx, co, rigIdx)
+	default:
+		return serveRigSV1(ctx, co, rigIdx)
+	}
+}
+
+// serveRigSV1 accepts SV1 miner connections on one rig's dedicated port.
 //
 // Each rig gets its own listener rather than sharing one, because the whole
 // scheme depends on addressing rigs independently -- that is what lets two
 // rigs cover three pools without ever doubling up.
-func serveRig(ctx context.Context, co *coordinator, rigIdx int) error {
+func serveRigSV1(ctx context.Context, co *coordinator, rigIdx int) error {
 	rig := co.cfg.Rigs[rigIdx]
 	var lc net.ListenConfig
-	ln, err := lc.Listen(ctx, "tcp", rig.Listen)
+	ln, err := lc.Listen(ctx, "tcp", rig.listenAddr())
 	if err != nil {
-		return fmt.Errorf("listening for %s on %s: %w", co.rigLabel(rigIdx), rig.Listen, err)
+		return fmt.Errorf("listening for %s on %s: %w", co.rigLabel(rigIdx), rig.listenAddr(), err)
 	}
-	log.Printf("[%s] listening on %s", co.rigLabel(rigIdx), rig.Listen)
+	log.Printf("[%s] listening on %s", co.rigLabel(rigIdx), rig.listenAddr())
 
 	go func() {
 		<-ctx.Done()

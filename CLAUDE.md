@@ -1,8 +1,9 @@
 # switchyard
 
 A stratum proxy that rotates mining rigs across DATUM gateways so every pool
-gets an even share of work. Single Go binary, no third-party dependencies, with
-the dashboard embedded via `go:embed`.
+gets an even share of work. Single Go binary with minimal, purpose-chosen
+dependencies -- we add only what we genuinely need (the SV2 Noise suite needs
+real crypto) and keep the set small -- and the dashboard embedded via `go:embed`.
 
 ## Before you finish any change
 
@@ -23,14 +24,15 @@ gofmt -l . && go vet ./... && go test -race ./... && node tools/checkjs.js
 
 These are not style preferences. Each one was found by losing shares.
 
-- **`versionRollingMask` defaults to empty and must stay that way** unless
-  *every* rig uses version rolling. `mining.configure` is only legal before
-  `mining.subscribe` and cannot be renegotiated, so it is negotiated on the
-  upstream session at connect time. But DATUM treats the extension as binding
-  in both directions (`datum_stratum.c:1255`): once negotiated, it *requires*
-  `params[5]` on every submit. A rig that never asked sends five params and
-  every share is rejected as `bad-version`. Enabling this speculatively is a
-  100% reject rate, not a missed optimisation.
+- **Version rolling is not supported, and the config field is gone** (removed
+  in v1.0.0). It could only ever be safe if *every* rig used version rolling:
+  `mining.configure` is only legal before `mining.subscribe` and cannot be
+  renegotiated, so it would have to be negotiated on the upstream session at
+  connect time. But DATUM treats the extension as binding in both directions
+  (`datum_stratum.c:1255`): once negotiated, it *requires* `params[5]` on every
+  submit, so a rig that never asked sends five params and every share is
+  rejected as `bad-version` -- a 100% reject rate. switchyard therefore never
+  negotiates it (`upstream.handshake`), and there is no option to turn it on.
 - **`pool_pass_full_users` must be false on every gateway.** DATUM's default is
   *true* -- do not describe false as the default anywhere. With it true, the
   gateway forwards the whole username and the pool credits whatever precedes

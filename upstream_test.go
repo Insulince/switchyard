@@ -135,9 +135,8 @@ func TestFractionalDifficultyIsForwardedExactly(t *testing.T) {
 
 func testConfig() config {
 	c := config{
-		StatusListen: "127.0.0.1:0",
-		Pools:        []poolConfig{{Name: "lazarus", Host: "127.0.0.1", Port: 23338, StatusPort: 7156}},
-		Rigs:         []rigConfig{{Listen: "0.0.0.0:23401"}},
+		Pools: []poolConfig{{Name: "lazarus", Host: "127.0.0.1", Port: 23338, StatusPort: 7156, Protocol: "sv1"}},
+		Rigs:  []rigConfig{{Port: 23401, Protocol: "sv1"}},
 	}
 	c.applyDefaults()
 	return c

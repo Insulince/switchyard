@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"math/rand/v2"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -16,8 +17,10 @@ type coordinator struct {
 	cfg config
 
 	// ups is the full mesh, indexed [rigIdx][poolIdx]. Every one of these
-	// sessions is live at all times regardless of the current assignment.
-	ups [][]*upstream
+	// sessions is live at all times regardless of the current assignment. The
+	// element is a poolLink, so one mesh can mix SV1 and SV2 pools; each link's
+	// protocol is fixed at construction (see newPoolLink).
+	ups [][]poolLink
 
 	// base is each rig's fixed starting pool offset, randomised at startup.
 	base []int
@@ -49,8 +52,9 @@ type coordinator struct {
 	lastRotate   time.Time
 	// sessions is every miner bound on each rig port. A port is one virtual
 	// rig however many machines sit behind it; the slice is only so the
-	// dashboard can say how many.
-	sessions [][]*rigSession
+	// dashboard can say how many. The element is a downstreamSession so an SV1
+	// (*rigSession) and an SV2 (*sv2RigSession) miner rotate and render alike.
+	sessions [][]downstreamSession
 
 	// waitingSince and everSeen are what let a missing miner be reported as
 	// "not here YET" rather than "not here".
@@ -118,7 +122,7 @@ func newCoordinator(cfg config) *coordinator {
 	co := &coordinator{
 		cfg:       cfg,
 		startedAt: time.Now(),
-		sessions:  make([][]*rigSession, len(cfg.Rigs)),
+		sessions:  make([][]downstreamSession, len(cfg.Rigs)),
 		// The clock starts at construction: a fresh boot and a config reload
 		// are the same event to a miner, which finds its connection gone and
 		// backs off before trying again.
@@ -132,11 +136,11 @@ func newCoordinator(cfg config) *coordinator {
 	for i := range co.creds {
 		co.creds[i] = newCredState()
 	}
-	co.ups = make([][]*upstream, len(cfg.Rigs))
+	co.ups = make([][]poolLink, len(cfg.Rigs))
 	for i, rig := range cfg.Rigs {
-		co.ups[i] = make([]*upstream, len(cfg.Pools))
+		co.ups[i] = make([]poolLink, len(cfg.Pools))
 		for j, pool := range cfg.Pools {
-			co.ups[i][j] = newUpstream(co, i, j, rig, pool)
+			co.ups[i][j] = newPoolLink(co, i, j, rig, pool)
 		}
 	}
 	return co
@@ -166,6 +170,13 @@ func (co *coordinator) start(ctx context.Context) {
 // Whatever the offsets are, every rig still visits every pool exactly once per
 // P steps, so each pool's average is the same regardless of the starting
 // arrangement. That is what makes randomising the start safe.
+//
+// The offsets are not frozen for the life of the process. randomBalancedStart
+// seeds them over every CONFIGURED rig, but a configured port with no miner is
+// a phantom that would otherwise wedge two real rigs onto one pool for a whole
+// run. So the LIVE rigs' offsets are recomputed whenever the live set changes
+// (respreadLive) -- still fixed BETWEEN changes, so everything above holds
+// within a stable live set, just computed over the rigs that are hashing.
 func (co *coordinator) activePoolIdx(rigIdx int) int {
 	return (co.base[rigIdx] + co.step) % len(co.cfg.Pools)
 }
@@ -207,6 +218,160 @@ func randomBalancedStart(nRigs, nPools int) []int {
 	return base
 }
 
+// spreadOffsets revises pool offsets so the LIVE rigs sit on distinct pools --
+// balanced when they outnumber pools -- while moving as few rigs as it can.
+//
+// It works in offset space alone, which is the whole trick. A rig is on pool
+// (base[i]+step) mod P and every rig advances by the same step, so two live
+// rigs are on distinct pools at EVERY step precisely when their offsets differ
+// mod P. Handing the live rigs distinct offsets therefore spreads them for all
+// rotations at once; there is nothing to recompute per block.
+//
+// preferKeep is a rig to settle first, so a contested pool stays with it and
+// the move lands on the other rig. On a new connection it is the newcomer: the
+// rig already hashing keeps its socket and the arriving one yields -- which is
+// also why respreadLive only ever closes an established session, never the one
+// still being set up. -1 means no preference.
+//
+// rng(n) returns a value in [0,n); it breaks ties so no pool is systematically
+// the one left dark or doubled. The result is the revised offsets and the rigs
+// whose offset changed -- the ones that must reconnect onto their new pool.
+func spreadOffsets(base []int, live []bool, nPools, preferKeep int, rng func(int) int) (out []int, moved []int) {
+	out = append([]int(nil), base...)
+	if nPools <= 0 {
+		return out, nil
+	}
+	var liveIdx []int
+	for i, l := range live {
+		if l {
+			liveIdx = append(liveIdx, i)
+		}
+	}
+	if len(liveIdx) == 0 {
+		return out, nil
+	}
+
+	// Capacity per offset: floor(L/P) everywhere, the remainder handed to the
+	// offsets that already carry the most live rigs so the fewest have to move.
+	// Ties for the remainder are random.
+	L := len(liveIdx)
+	capa := make([]int, nPools)
+	for o := range capa {
+		capa[o] = L / nPools
+	}
+	if extra := L % nPools; extra > 0 {
+		load := make([]int, nPools)
+		for _, i := range liveIdx {
+			load[out[i]%nPools]++
+		}
+		for _, o := range topLoaded(load, extra, rng) {
+			capa[o]++
+		}
+	}
+
+	// Settle preferKeep first so it holds its offset; the rest follow. A rig
+	// whose offset still has room stays; the overflow is what moves.
+	order := make([]int, 0, L)
+	if preferKeep >= 0 && preferKeep < len(live) && live[preferKeep] {
+		order = append(order, preferKeep)
+	}
+	for _, i := range liveIdx {
+		if i != preferKeep {
+			order = append(order, i)
+		}
+	}
+
+	used := make([]int, nPools)
+	var overflow []int
+	for _, i := range order {
+		if o := out[i] % nPools; used[o] < capa[o] {
+			used[o]++
+		} else {
+			overflow = append(overflow, i)
+		}
+	}
+	// Place the overflow on offsets with room, random among them. cands is
+	// never empty: total capacity equals the number of live rigs.
+	for _, i := range overflow {
+		var cands []int
+		for o := range nPools {
+			if used[o] < capa[o] {
+				cands = append(cands, o)
+			}
+		}
+		pick := cands[rng(len(cands))]
+		out[i] = pick
+		used[pick]++
+		moved = append(moved, i)
+	}
+	return out, moved
+}
+
+// topLoaded returns k offsets with the highest load, ties broken by rng so the
+// remainder capacity is not handed to the same offsets every time.
+func topLoaded(load []int, k int, rng func(int) int) []int {
+	idx := make([]int, len(load))
+	for i := range idx {
+		idx[i] = i
+	}
+	for i := len(idx) - 1; i > 0; i-- {
+		j := rng(i + 1)
+		idx[i], idx[j] = idx[j], idx[i]
+	}
+	sort.SliceStable(idx, func(a, b int) bool { return load[idx[a]] > load[idx[b]] })
+	if k > len(idx) {
+		k = len(idx)
+	}
+	return idx[:k]
+}
+
+// respreadLive re-spreads the live rigs after the live set changed, and
+// reconnects only the rigs that must move. preferKeep is a rig to leave in
+// place (the one whose connection just triggered this), or -1.
+//
+// This is the dynamic half of the scheduling policy, and it exists because the
+// opening arrangement spreads every CONFIGURED rig -- including ports with no
+// miner. Those phantoms take offsets, and with four ports over three pools that
+// routinely wedged the two real rigs onto one pool for an entire run. So the
+// instant the live set changes, the offsets are recomputed over the rigs that
+// are actually hashing.
+//
+// It re-spreads immediately on any connect or disconnect, even inside the dwell
+// floor. That is a deliberate trade: live rigs landing on distinct pools as
+// often as possible is worth more here than the even-split fairness band, whose
+// constant-separation assumption this weakens. The band already errs wide and
+// is gated on a full cycle, so it degrades rather than lies.
+func (co *coordinator) respreadLive(preferKeep int) {
+	co.mu.Lock()
+	live := make([]bool, len(co.sessions))
+	for i := range co.sessions {
+		live[i] = len(co.sessions[i]) > 0
+	}
+	newBase, moved := spreadOffsets(co.base, live, len(co.cfg.Pools), preferKeep, rand.IntN)
+	if len(moved) == 0 {
+		co.mu.Unlock()
+		return
+	}
+	co.base = newBase
+	// Close the moved rigs' sessions so they reconnect onto their new pool, and
+	// attribute the gap to switchyard exactly as a rotation does. Marked and
+	// collected under the lock; closed outside it, as rotate does.
+	var victims []downstreamSession
+	for _, i := range moved {
+		for _, s := range co.sessions[i] {
+			s.markRotated()
+			victims = append(victims, s)
+		}
+	}
+	table := co.assignmentTableLocked(co.step, false)
+	co.mu.Unlock()
+
+	log.Printf("re-spread live rigs%s", table)
+	for _, s := range victims {
+		s.close()
+	}
+}
+
 // upstreamForRig returns the gateway a newly-connecting rig should bind to.
 //
 // It prefers the scheduled pool, but falls back to any ready gateway rather
@@ -214,7 +379,7 @@ func randomBalancedStart(nRigs, nPools int) []int {
 // slot is strictly better than a rig sitting idle because one gateway
 // happens to be down -- and gateways do go down, as maveth's version
 // rejection demonstrated.
-func (co *coordinator) upstreamForRig(rigIdx int) (*upstream, bool) {
+func (co *coordinator) upstreamForRig(rigIdx int) (poolLink, bool) {
 	co.mu.Lock()
 	want := co.activePoolIdx(rigIdx)
 	co.mu.Unlock()
@@ -225,7 +390,7 @@ func (co *coordinator) upstreamForRig(rigIdx int) (*upstream, bool) {
 	for j := range co.ups[rigIdx] {
 		if u := co.ups[rigIdx][j]; u.isReady() {
 			log.Printf("[%s] scheduled pool %s unavailable; falling back to %s",
-				co.rigLabel(rigIdx), co.cfg.Pools[want].displayName(), u.pool.displayName())
+				co.rigLabel(rigIdx), co.cfg.Pools[want].displayName(), u.displayName())
 			return u, true
 		}
 	}
@@ -253,10 +418,10 @@ func (co *coordinator) gatewayReady(rigIdx, poolIdx int) {
 		return
 	}
 	want := co.ups[rigIdx][poolIdx]
-	var strays []*rigSession
+	var strays []downstreamSession
 	for _, s := range co.sessions[rigIdx] {
-		if s.up != nil && s.up != want {
-			s.rotated = true
+		if s.boundLink() != nil && s.boundLink() != want {
+			s.markRotated()
 			strays = append(strays, s)
 		}
 	}
@@ -362,7 +527,7 @@ func (co *coordinator) rotate(reason string) {
 	// Written under co.mu and read under co.mu in clearSession, which is what
 	// makes the handoff race-free.
 	for _, s := range victims {
-		s.rotated = true
+		s.markRotated()
 	}
 	table := co.assignmentTableLocked(prevStep, true)
 	co.mu.Unlock()
@@ -471,19 +636,27 @@ func filledNow(n int) []time.Time {
 	return out
 }
 
-func (co *coordinator) setSession(rigIdx int, s *rigSession) {
+func (co *coordinator) setSession(rigIdx int, s downstreamSession) {
 	co.mu.Lock()
 	// Before the clock is cleared below: the gap between the close and now is
 	// what the rotation cost.
 	// Only the first miner back ends the wait; a second one joining a live
 	// port is not a reconnect.
-	if len(co.sessions[rigIdx]) == 0 {
+	becameLive := len(co.sessions[rigIdx]) == 0
+	if becameLive {
 		co.recordRotationGapLocked(rigIdx)
 		co.waitingSince[rigIdx] = time.Time{}
 	}
 	co.sessions[rigIdx] = append(co.sessions[rigIdx], s)
 	co.everSeen[rigIdx] = true
 	co.mu.Unlock()
+
+	// A port going from empty to occupied changes the live set: re-spread so
+	// this rig lands on a pool no other live rig holds, keeping it in place and
+	// moving an incumbent only if they would otherwise collide.
+	if becameLive {
+		co.respreadLive(rigIdx)
+	}
 }
 
 // recordRotationGapLocked times a rig's return, if switchyard is what sent it
@@ -513,26 +686,26 @@ func (co *coordinator) recordRotationGapLocked(rigIdx int) {
 // not count as company.
 // allSessionsLocked flattens every port's miners into one list. Caller
 // holds co.mu.
-func (co *coordinator) allSessionsLocked() []*rigSession {
-	var out []*rigSession
+func (co *coordinator) allSessionsLocked() []downstreamSession {
+	var out []downstreamSession
 	for _, ss := range co.sessions {
 		out = append(out, ss...)
 	}
 	return out
 }
 
-func (co *coordinator) otherMiners(rigIdx int, s *rigSession) int {
+func (co *coordinator) otherMiners(rigIdx int, s downstreamSession) int {
 	co.mu.Lock()
 	defer co.mu.Unlock()
 	n := 0
 	for _, x := range co.sessions[rigIdx] {
-		// done is nil only on a bare literal; every accepted session has
+		// doneChan is nil only on a bare literal; every accepted session has
 		// one. Guarded so a test can register placeholders without a socket.
-		if x == s || x.done == nil {
+		if x == s || x.doneChan() == nil {
 			continue
 		}
 		select {
-		case <-x.done:
+		case <-x.doneChan():
 		default:
 			n++
 		}
@@ -540,8 +713,9 @@ func (co *coordinator) otherMiners(rigIdx int, s *rigSession) int {
 	return n
 }
 
-func (co *coordinator) clearSession(rigIdx int, s *rigSession) {
+func (co *coordinator) clearSession(rigIdx int, s downstreamSession) {
 	co.mu.Lock()
+	becameDead := false
 	ss := co.sessions[rigIdx]
 	for i, x := range ss {
 		if x != s {
@@ -554,11 +728,19 @@ func (co *coordinator) clearSession(rigIdx int, s *rigSession) {
 			// the cause anywhere other than the moment of the disconnect
 			// means recording it about a different moment.
 			co.waitingSince[rigIdx] = time.Now()
-			co.rotating[rigIdx] = s.rotated
+			co.rotating[rigIdx] = s.rotatedByUs()
+			becameDead = true
 		}
 		break
 	}
 	co.mu.Unlock()
+
+	// A port emptying changes the live set too. With fewer live rigs than pools
+	// the survivors are already distinct and nothing moves; it earns its keep
+	// when rigs outnumber pools, where a departure can free a doubled pool.
+	if becameDead {
+		co.respreadLive(-1)
+	}
 }
 
 type gatewayStatus struct {
@@ -604,9 +786,14 @@ type rigStatus struct {
 	Miners       []string `json:"miners"`
 	AuthorisedAs string   `json:"authorisedAs,omitempty"`
 
-	Listen     string `json:"listen"`
+	Port       int    `json:"port"`
 	ActivePool string `json:"activePool"`
 	Connected  bool   `json:"connected"`
+
+	// Protocol is how the miner on this port speaks to switchyard, "sv1" or
+	// "sv2". The dashboard badges sv2 and leaves sv1 unmarked, since sv1 is the
+	// norm -- the same "identity, shown only when it applies" treatment as Solo.
+	Protocol string `json:"protocol,omitempty"`
 
 	// WaitingSeconds is how long this rig has had no miner on it, and
 	// EverSeen whether one has ever arrived. Together they separate "give it a
@@ -642,6 +829,10 @@ type poolStatus struct {
 	// Solo is the config's mark: this entry is the solo slot, and the
 	// dashboard draws it as "Solo -> network" rather than as a pool.
 	Solo bool `json:"solo,omitempty"`
+
+	// Protocol is how switchyard speaks to this gateway, "sv1" or "sv2". Badged
+	// on the dashboard for sv2 only (sv1 is the norm, left unmarked).
+	Protocol string `json:"protocol,omitempty"`
 
 	// Health is the gateway's own report of how the pool behind it is treating
 	// the work. Absent when no status page is configured.
@@ -690,19 +881,19 @@ type statusDoc struct {
 	// show a setup form instead of an empty dashboard.
 	Configured bool `json:"configured"`
 
-	Step            int       `json:"step"`
-	Rotations       int       `json:"rotations"`
-	LastPrevhash    string    `json:"lastPrevhash"`
-	LastRotate      time.Time `json:"lastRotate"`
-	MinDwellSeconds int       `json:"minDwellSeconds"`
-	MaxDwellSeconds int       `json:"maxDwellSeconds"`
-	PollSeconds     float64   `json:"pollSeconds"`
-	RateWindowSecs  int       `json:"rateWindowSecs"`
-	StartedAt       time.Time `json:"startedAt"`
-	Now             time.Time `json:"now"`
-	ElapsedSeconds  float64   `json:"elapsedSeconds"`
-	TotalThs        float64   `json:"totalThs"`
-	TotalNowThs     float64   `json:"totalNowThs"`
+	Step                 int       `json:"step"`
+	Rotations            int       `json:"rotations"`
+	LastPrevhash         string    `json:"lastPrevhash"`
+	LastRotate           time.Time `json:"lastRotate"`
+	MinDwellSeconds      int       `json:"minDwellSeconds"`
+	MaxDwellSeconds      int       `json:"maxDwellSeconds"`
+	DashboardPollSeconds float64   `json:"dashboardPollSeconds"`
+	RateWindowSecs       int       `json:"rateWindowSecs"`
+	StartedAt            time.Time `json:"startedAt"`
+	Now                  time.Time `json:"now"`
+	ElapsedSeconds       float64   `json:"elapsedSeconds"`
+	TotalThs             float64   `json:"totalThs"`
+	TotalNowThs          float64   `json:"totalNowThs"`
 
 	// What rotating has actually cost, measured. Reconnects is how many
 	// rotation-caused gaps have been timed; the mean and worst are those gaps
@@ -811,7 +1002,7 @@ func (co *coordinator) status() statusDoc {
 		LastRotate:            co.lastRotate,
 		MinDwellSeconds:       co.cfg.MinDwellSeconds,
 		MaxDwellSeconds:       co.cfg.MaxDwellSeconds,
-		PollSeconds:           co.cfg.PollSeconds,
+		DashboardPollSeconds:  co.cfg.DashboardPollSeconds,
 		RateWindowSecs:        int(rateWindow / time.Second),
 		StartedAt:             co.startedAt,
 		Now:                   now,
@@ -822,9 +1013,9 @@ func (co *coordinator) status() statusDoc {
 		RotationCostPct:       rotationCostPct,
 	}
 	active := make([]int, len(co.cfg.Rigs))
-	sessions := make([][]*rigSession, len(co.sessions))
+	sessions := make([][]downstreamSession, len(co.sessions))
 	for i, ss := range co.sessions {
-		sessions[i] = append([]*rigSession(nil), ss...)
+		sessions[i] = append([]downstreamSession(nil), ss...)
 	}
 	// Copied under the same lock as the sessions they describe, so a rig
 	// cannot appear absent here and connected two lines later.
@@ -860,6 +1051,7 @@ func (co *coordinator) status() statusDoc {
 			Addr:      pool.stratumAddr(),
 			Host:      pool.Host,
 			Solo:      pool.Solo,
+			Protocol:  pool.proto(),
 			Occupants: []string{},
 		}
 	}
@@ -869,14 +1061,15 @@ func (co *coordinator) status() statusDoc {
 	for i, rig := range co.cfg.Rigs {
 		rs := rigStatus{
 			Name:       co.rigLabel(i),
-			Listen:     rig.Listen,
+			Port:       rig.Port,
 			ActivePool: poolName[active[i]],
 			Connected:  len(sessions[i]) > 0,
 			EverSeen:   everSeen[i],
+			Protocol:   rig.proto(),
 			Miners:     []string{},
 		}
 		for _, s := range sessions[i] {
-			rs.Miners = append(rs.Miners, s.claimedUserSafe())
+			rs.Miners = append(rs.Miners, s.label())
 		}
 		if len(sessions[i]) == 0 && !waitingSince[i].IsZero() {
 			rs.WaitingSeconds = int(time.Since(waitingSince[i]).Seconds())
@@ -890,10 +1083,10 @@ func (co *coordinator) status() statusDoc {
 		boundIdx := -1
 		if len(sessions[i]) > 0 {
 			first := sessions[i][0]
-			rs.ClaimedUser = first.claimedUserSafe()
-			if first.up != nil {
+			rs.ClaimedUser = first.label()
+			if bl := first.boundLink(); bl != nil {
 				for j := range co.ups[i] {
-					if co.ups[i][j] == first.up {
+					if co.ups[i][j] == bl {
 						boundIdx = j
 						rs.BoundTo = poolName[j]
 						break

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -9,11 +10,27 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/btcsuite/btcd/btcec/v2"
 )
 
 func main() {
 	configPath := flag.String("config", "config.json", "path to config file")
 	showVersion := flag.Bool("version", false, "print the version and exit")
+	// SV2 authority-key helpers. An SV2 rig listener needs switchyard's own
+	// authority secret in its rigConfig, and the downstream translator needs the
+	// matching PUBLIC key on its command line. These two flags are the operator
+	// path from one to the other, reusing the single pinned encoder
+	// (authorityKeyEncode) so the string an operator pins can never drift from
+	// the one switchyard presents.
+	//
+	// The secret is NEVER printed: genauthkey writes it (0600 hex) to a file and
+	// prints only the public key, so a terminal, a log or a captured command
+	// output can carry the public half without ever carrying the secret.
+	genAuthKey := flag.String("genauthkey", "",
+		"mint a fresh SV2 authority secret, write it (0600 hex) to this path, and print its public key")
+	authPubOf := flag.String("authpub", "",
+		"read an SV2 authority secret (hex) from this path and print its public key")
 	flag.Parse()
 
 	// Answerable without a browser. Someone running a downloaded binary needs
@@ -21,6 +38,34 @@ func main() {
 	// and "start it and open the dashboard" is a poor way to ask.
 	if *showVersion {
 		fmt.Println("switchyard", versionString())
+		return
+	}
+
+	// btcec.NewPrivateKey draws a scalar correctly in the secp256k1 range (never
+	// zero or out of range), which raw random bytes would not guarantee -- the
+	// reason to mint the key through the crypto library rather than /dev/urandom.
+	if *genAuthKey != "" {
+		priv, err := btcec.NewPrivateKey()
+		if err != nil {
+			log.Fatalf("genauthkey: %v", err)
+		}
+		secretHex := hex.EncodeToString(priv.Serialize())
+		if err := os.WriteFile(*genAuthKey, []byte(secretHex+"\n"), 0o600); err != nil {
+			log.Fatalf("genauthkey: writing secret to %s: %v", *genAuthKey, err)
+		}
+		fmt.Println(authorityKeyEncode(priv.PubKey()))
+		return
+	}
+	if *authPubOf != "" {
+		b, err := os.ReadFile(*authPubOf)
+		if err != nil {
+			log.Fatalf("authpub: %v", err)
+		}
+		priv, err := authoritySecretDecode(string(b))
+		if err != nil {
+			log.Fatalf("authpub: %v", err)
+		}
+		fmt.Println(authorityKeyEncode(priv.PubKey()))
 		return
 	}
 
@@ -51,7 +96,7 @@ func main() {
 			log.Fatalf("config: %v", err)
 		}
 
-		if err := srv.listen(cfg.StatusListen); err != nil {
+		if err := srv.listen(cfg.dashboardAddr()); err != nil {
 			log.Fatalf("%v", err)
 		}
 
@@ -78,7 +123,7 @@ func main() {
 			// install rather than an error. The dashboard notices the same
 			// thing and shows a setup form instead of a dashboard.
 			log.Printf("switchyard: not configured yet -- open %s to set up rigs and pools",
-				browseURL(cfg.StatusListen))
+				browseURL(cfg.dashboardAddr()))
 			close(gateDone)
 		} else {
 			log.Printf("switchyard: %d rigs %v across %d pools, dwell %ds-%ds",

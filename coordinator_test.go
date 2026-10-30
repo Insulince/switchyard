@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"testing"
 	"time"
 )
@@ -87,7 +88,7 @@ func TestRandomBalancedStartIsRandom(t *testing.T) {
 func TestStatusReportsHowLongARigHasBeenWaiting(t *testing.T) {
 	co := newCoordinator(config{
 		Pools: []poolConfig{{Host: "a", Port: 1, StatusPort: 2}, {Host: "b", Port: 3, StatusPort: 4}},
-		Rigs:  []rigConfig{{Listen: "23401"}},
+		Rigs:  []rigConfig{{Port: 23401, Protocol: "sv1"}},
 	})
 
 	// Never connected: waiting since construction, and known never to have
@@ -158,7 +159,7 @@ func TestStatusNeverEmitsNullCollections(t *testing.T) {
 // that vanishes for its own reasons is not a rotation cost.
 func TestRotationCostCountsOnlyRotationGaps(t *testing.T) {
 	co := newCoordinator(config{
-		Rigs:  []rigConfig{{Listen: ":23401"}},
+		Rigs:  []rigConfig{{Port: 23401, Protocol: "sv1"}},
 		Pools: []poolConfig{{Name: "A", Host: "h", Port: 1, StatusPort: 2}},
 	})
 	s1, s2 := &rigSession{}, &rigSession{}
@@ -316,10 +317,122 @@ func TestFastBlocksAreHeldOffByTheDwellFloor(t *testing.T) {
 	}
 }
 
+// zeroRng is a deterministic stand-in for the tie-breaker: it always picks the
+// first candidate, so spreadOffsets' arithmetic can be asserted exactly without
+// the randomness it uses in production for fairness.
+func zeroRng() func(int) int { return func(int) int { return 0 } }
+
+// THE BUG THIS FIXES COST A WHOLE RUN OF LOPSIDED WORK.
+//
+// Four rig ports over three pools, only two with a miner, and the opening
+// arrangement wedged BOTH live rigs onto one pool -- every rotation, for the
+// life of the process, because the offsets were frozen over all four phantom
+// ports. The live set is what has to be spread, not the configured set.
+func TestSpreadOffsetsSeparatesWedgedLiveRigs(t *testing.T) {
+	base := []int{0, 1, 2, 1}                // rigs 1 and 3 share offset 1
+	live := []bool{false, true, false, true} // only rigs 1 and 3 are hashing
+	out, moved := spreadOffsets(base, live, 3, 3, zeroRng())
+	if out[1]%3 == out[3]%3 {
+		t.Fatalf("live rigs still share a pool: offsets %v", out)
+	}
+	if out[3] != 1 {
+		t.Errorf("preferKeep rig should not move, got offsets %v", out)
+	}
+	if len(moved) != 1 || moved[0] != 1 {
+		t.Errorf("only the incumbent that collided should move, got %v", moved)
+	}
+}
+
+// A departure or arrival that does not create a collision must move nobody --
+// re-spreading an already-spread fleet would spend reconnects (hashrate) for
+// no gain, and spread-as-often-as-possible does not mean churn-for-its-own-sake.
+func TestSpreadOffsetsLeavesSpreadRigsAlone(t *testing.T) {
+	base := []int{0, 1, 2, 1}
+	live := []bool{true, true, false, false} // rigs 0,1 on offsets 0,1 -- distinct
+	out, moved := spreadOffsets(base, live, 3, -1, zeroRng())
+	if len(moved) != 0 {
+		t.Fatalf("already-spread rigs moved: %v (offsets %v)", moved, out)
+	}
+	if out[0] != 0 || out[1] != 1 {
+		t.Errorf("offsets of settled rigs changed: %v", out)
+	}
+}
+
+// When live rigs outnumber pools the guarantee weakens to balance, exactly as
+// the opening arrangement's does: no pool holds two more live rigs than another.
+func TestSpreadOffsetsBalancesWhenLiveExceedPools(t *testing.T) {
+	base := []int{0, 0, 0, 0} // all wedged onto one pool
+	live := []bool{true, true, true, true}
+	out, _ := spreadOffsets(base, live, 3, -1, zeroRng())
+	load := make([]int, 3)
+	for i, l := range live {
+		if l {
+			load[out[i]%3]++
+		}
+	}
+	lo, hi := load[0], load[0]
+	for _, n := range load[1:] {
+		if n < lo {
+			lo = n
+		}
+		if n > hi {
+			hi = n
+		}
+	}
+	if hi-lo > 1 {
+		t.Fatalf("live load not balanced: %v", load)
+	}
+}
+
+// The end-to-end path: a second live rig connecting onto a pool another live
+// rig already holds re-spreads through the real coordinator, closing the
+// incumbent's session (so it reconnects onto a free pool) and attributing the
+// gap to switchyard.
+func TestRespreadLiveMovesACollidingRigThroughTheCoordinator(t *testing.T) {
+	co := newCoordinator(scheduleConfig(4, 3))
+	co.base = []int{0, 1, 2, 1} // rigs 1 and 3 scheduled onto the same pool
+
+	s1 := liveSession(t, co, 1)
+	co.setSession(1, s1) // first live rig: nothing to spread against yet
+	select {
+	case <-s1.done:
+		t.Fatal("the first live rig was moved with no collision to fix")
+	default:
+	}
+
+	s3 := liveSession(t, co, 3)
+	co.setSession(3, s3) // collides with rig 1 -> respread moves the incumbent
+
+	select {
+	case <-s1.done:
+	case <-time.After(time.Second):
+		t.Fatal("wedged incumbent was not moved off the shared pool")
+	}
+	if !s1.rotated {
+		t.Error("the move was not attributed to switchyard; its gap would read as a miner fault")
+	}
+	co.mu.Lock()
+	o1, o3 := co.base[1]%3, co.base[3]%3
+	co.mu.Unlock()
+	if o1 == o3 {
+		t.Fatalf("live rigs still share a pool after respread: %d == %d", o1, o3)
+	}
+}
+
+// liveSession builds a session on an arbitrary rig port with a real pipe behind
+// it, so close() has something to close. pipeSession is pinned to rig 0.
+func liveSession(t *testing.T, co *coordinator, rigIdx int) *rigSession {
+	t.Helper()
+	a, b := net.Pipe()
+	s := newRigSession(co, co.cfg.Rigs[rigIdx], rigIdx, a)
+	t.Cleanup(func() { s.close(); _ = b.Close() })
+	return s
+}
+
 func scheduleConfig(rigs, pools int) config {
 	c := config{}
 	for i := 0; i < rigs; i++ {
-		c.Rigs = append(c.Rigs, rigConfig{Listen: fmt.Sprintf(":%d", 23401+i)})
+		c.Rigs = append(c.Rigs, rigConfig{Port: 23401 + i, Protocol: "sv1"})
 	}
 	for i := 0; i < pools; i++ {
 		c.Pools = append(c.Pools, poolConfig{
@@ -405,7 +518,7 @@ func TestRigOnFallbackMovesWhenItsScheduledGatewayIsReady(t *testing.T) {
 			{Name: "a", Host: "127.0.0.1", Port: 1, StatusPort: 2},
 			{Name: "b", Host: "127.0.0.1", Port: 3, StatusPort: 4},
 		},
-		Rigs: []rigConfig{{Listen: "0.0.0.0:23401"}},
+		Rigs: []rigConfig{{Port: 23401, Protocol: "sv1"}},
 	}
 	cfg.applyDefaults()
 	co := newCoordinator(cfg)

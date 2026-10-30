@@ -158,7 +158,7 @@ func TestSameNameMinersCoexist(t *testing.T) {
 // rotation's wait.
 func TestPortIsConnectedWhileAnyMinerRemains(t *testing.T) {
 	co := newCoordinator(config{
-		Rigs:  []rigConfig{{Listen: ":23401"}},
+		Rigs:  []rigConfig{{Port: 23401, Protocol: "sv1"}},
 		Pools: []poolConfig{{Name: "A", Host: "h", Port: 1, StatusPort: 2}},
 	})
 	s1 := &rigSession{claimedUser: "one"}
@@ -192,7 +192,9 @@ func fleetPort(t *testing.T) *coordinator {
 	t.Helper()
 	cfg := testConfig()
 	co := newCoordinator(cfg)
-	u := co.ups[0][0]
+	// This helper fakes a ready SV1 session by reaching into the concrete
+	// upstream's fields, so it asserts past the poolLink surface on purpose.
+	u := co.ups[0][0].(*upstream)
 	gw, ours := net.Pipe()
 	t.Cleanup(func() { _ = gw.Close(); _ = ours.Close() })
 	u.mu.Lock()

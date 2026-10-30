@@ -8,7 +8,24 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/btcsuite/btcd/btcec/v2"
 )
+
+// a freshly-generated, correctly-formatted SV2 authority public key string, for
+// the config tests below. The matching secret is irrelevant to them -- validation
+// only cares that the key is well-formed.
+func testAuthorityKey(t *testing.T) string {
+	t.Helper()
+	priv, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return authorityKeyEncode(priv.PubKey())
+}
+
+// a valid 32-byte hex secp256k1 scalar for an sv2 rig's authoritySecret.
+const testAuthoritySecret = "5300a042c44499ec5d09d222043ec4af04bfc6bb5403c8aa9f6195c89523aa5d"
 
 // A fresh install has no config file, and that must not be fatal. The whole
 // first-run flow depends on switchyard being able to start with nothing, serve
@@ -27,7 +44,7 @@ func TestMissingConfigStartsUnconfigured(t *testing.T) {
 	}
 	// Defaults still have to be there, or the setup form opens with blanks
 	// where it should be showing what it is about to use.
-	if cfg.MinDwellSeconds == 0 || cfg.MaxDwellSeconds == 0 || cfg.PollSeconds == 0 {
+	if cfg.MinDwellSeconds == 0 || cfg.MaxDwellSeconds == 0 || cfg.DashboardPollSeconds == 0 {
 		t.Errorf("defaults not applied to an empty config: %+v", cfg)
 	}
 }
@@ -55,17 +72,17 @@ func TestSavedConfigReloadsIdentically(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 
 	want := config{
-		StatusListen: "0.0.0.0:7160",
+		DashboardPort: 7160,
 		Pools: []poolConfig{
-			{Name: "alpha", Host: "127.0.0.1", Port: 23336, StatusPort: 7154},
-			{Name: "beta", Host: "127.0.0.1", Port: 23337, StatusPort: 7155},
+			{Name: "alpha", Host: "127.0.0.1", Port: 23336, StatusPort: 7154, Protocol: "sv1"},
+			{Name: "beta", Host: "127.0.0.1", Port: 23337, StatusPort: 7155, Protocol: "sv1"},
 		},
 		Rigs: []rigConfig{
-			{Listen: "0.0.0.0:23401"},
+			{Port: 23401, Protocol: "sv1"},
 		},
-		MinDwellSeconds: 90,
-		MaxDwellSeconds: 1200,
-		PollSeconds:     3,
+		MinDwellSeconds:      90,
+		MaxDwellSeconds:      1200,
+		DashboardPollSeconds: 3,
 	}
 	want.applyDefaults()
 	if err := want.validate(); err != nil {
@@ -117,11 +134,11 @@ func TestRigsWithoutPoolsIsRejected(t *testing.T) {
 		wantErr bool
 	}{
 		{"empty", config{}, false},
-		{"pools only", config{Pools: []poolConfig{{Name: "a", Host: "127.0.0.1", Port: 23336, StatusPort: 7154}}}, false},
-		{"rigs only", config{Rigs: []rigConfig{{Listen: ":1"}}}, true},
+		{"pools only", config{Pools: []poolConfig{{Name: "a", Host: "127.0.0.1", Port: 23336, StatusPort: 7154, Protocol: "sv1"}}}, false},
+		{"rigs only", config{Rigs: []rigConfig{{Port: 1, Protocol: "sv1"}}}, true},
 		{"both", config{
-			Pools: []poolConfig{{Name: "a", Host: "127.0.0.1", Port: 23336, StatusPort: 7154}},
-			Rigs:  []rigConfig{{Listen: ":1"}},
+			Pools: []poolConfig{{Name: "a", Host: "127.0.0.1", Port: 23336, StatusPort: 7154, Protocol: "sv1"}},
+			Rigs:  []rigConfig{{Port: 1, Protocol: "sv1"}},
 		}, false},
 	} {
 		cfg := c.cfg
@@ -129,25 +146,6 @@ func TestRigsWithoutPoolsIsRejected(t *testing.T) {
 		err := cfg.validate()
 		if (err != nil) != c.wantErr {
 			t.Errorf("%s: err = %v, wantErr %v", c.name, err, c.wantErr)
-		}
-	}
-}
-
-// "23401" is what an operator types. Refusing it in favour of "0.0.0.0:23401"
-// would be pedantry, and silently storing the bare string would produce a
-// listener on a port nobody expects.
-func TestNormaliseListen(t *testing.T) {
-	for in, want := range map[string]string{
-		"23401":             "0.0.0.0:23401",
-		":23401":            "0.0.0.0:23401",
-		"  23401  ":         "0.0.0.0:23401",
-		"0.0.0.0:23401":     "0.0.0.0:23401",
-		"127.0.0.1:23401":   "127.0.0.1:23401",
-		"192.168.1.5:23401": "192.168.1.5:23401",
-		"":                  "",
-	} {
-		if got := normaliseListen(in); got != want {
-			t.Errorf("normaliseListen(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
@@ -196,13 +194,13 @@ func TestSaveConfigFallbackWritesInPlace(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 
-	cfg := config{Pools: []poolConfig{{Name: "a", Host: "127.0.0.1", Port: 23336, StatusPort: 7154}}}
+	cfg := config{Pools: []poolConfig{{Name: "a", Host: "127.0.0.1", Port: 23336, StatusPort: 7154, Protocol: "sv1"}}}
 	cfg.applyDefaults()
 	if err := saveConfig(path, cfg); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg.Pools = append(cfg.Pools, poolConfig{Name: "b", Host: "127.0.0.1", Port: 23337, StatusPort: 7155})
+	cfg.Pools = append(cfg.Pools, poolConfig{Name: "b", Host: "127.0.0.1", Port: 23337, StatusPort: 7155, Protocol: "sv1"})
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		t.Fatal(err)
@@ -242,13 +240,16 @@ func TestWriteInPlaceTruncates(t *testing.T) {
 
 // A loopback default is unreachable from outside a container, a VM or a
 // package manager's sandbox -- which is where most operators run this. The
-// first-run message telling them to open a URL that refuses the connection was
-// the failure this guards.
-func TestDefaultStatusListenIsNotLoopbackOnly(t *testing.T) {
+// default dashboard bind is every interface (dashboardAddr() -> ":7160"), so
+// the first-run URL actually resolves from another device.
+func TestDefaultDashboardPortBindsAllInterfaces(t *testing.T) {
 	var c config
 	c.applyDefaults()
-	if c.StatusListen != ":7160" {
-		t.Fatalf("default statusListen = %q, want %q", c.StatusListen, ":7160")
+	if c.DashboardPort != 7160 {
+		t.Fatalf("default dashboardPort = %d, want 7160", c.DashboardPort)
+	}
+	if c.dashboardAddr() != ":7160" {
+		t.Fatalf("default dashboardAddr = %q, want %q (every interface)", c.dashboardAddr(), ":7160")
 	}
 }
 
@@ -291,7 +292,7 @@ func TestUnknownConfigKeysAreRejected(t *testing.T) {
 // a file that gives it one is wrong rather than quietly reinterpreted.
 func TestSoloEntryHasNoName(t *testing.T) {
 	c := config{Pools: []poolConfig{
-		{Solo: true, Name: "RIPTIDE-old", Host: "gw-solo", Port: 23339, StatusPort: 7157},
+		{Solo: true, Name: "RIPTIDE-old", Host: "gw-solo", Port: 23339, StatusPort: 7157, Protocol: "sv1"},
 	}}
 	c.applyDefaults()
 	err := c.validate()
@@ -312,8 +313,8 @@ func TestSoloEntryHasNoName(t *testing.T) {
 // mistake, caught on load and on save alike.
 func TestOnlyOneEntryMayBeSolo(t *testing.T) {
 	c := config{Pools: []poolConfig{
-		{Solo: true, Host: "gw-s1", Port: 23339, StatusPort: 7157},
-		{Solo: true, Host: "gw-s2", Port: 23340, StatusPort: 7158},
+		{Solo: true, Host: "gw-s1", Port: 23339, StatusPort: 7157, Protocol: "sv1"},
+		{Solo: true, Host: "gw-s2", Port: 23340, StatusPort: 7158, Protocol: "sv1"},
 	}}
 	c.applyDefaults()
 	err := c.validate()
@@ -326,8 +327,8 @@ func TestOnlyOneEntryMayBeSolo(t *testing.T) {
 // "Solo", next to the solo entry, and the two stay distinct.
 func TestAPoolMayBeNamedSolo(t *testing.T) {
 	c := config{Pools: []poolConfig{
-		{Name: "Solo", Host: "gw-a", Port: 23336, StatusPort: 7154},
-		{Solo: true, Host: "gw-solo", Port: 23339, StatusPort: 7157},
+		{Name: "Solo", Host: "gw-a", Port: 23336, StatusPort: 7154, Protocol: "sv1"},
+		{Solo: true, Host: "gw-solo", Port: 23339, StatusPort: 7157, Protocol: "sv1"},
 	}}
 	c.applyDefaults()
 	if err := c.validate(); err != nil {
@@ -342,8 +343,8 @@ func TestAPoolMayBeNamedSolo(t *testing.T) {
 // including for unnamed entries, which the old name check skipped.
 func TestLabelsMustBeUnique(t *testing.T) {
 	c := config{Pools: []poolConfig{
-		{Name: "gw-b:23337", Host: "gw-a", Port: 23336, StatusPort: 7154},
-		{Host: "gw-b", Port: 23337, StatusPort: 7155},
+		{Name: "gw-b:23337", Host: "gw-a", Port: 23336, StatusPort: 7154, Protocol: "sv1"},
+		{Host: "gw-b", Port: 23337, StatusPort: 7155, Protocol: "sv1"},
 	}}
 	c.applyDefaults()
 	err := c.validate()
@@ -354,7 +355,7 @@ func TestLabelsMustBeUnique(t *testing.T) {
 
 func TestSoloSurvivesSaveAndLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	c := config{Pools: []poolConfig{{Solo: true, Host: "gw-solo", Port: 23339, StatusPort: 7157}}}
+	c := config{Pools: []poolConfig{{Solo: true, Host: "gw-solo", Port: 23339, StatusPort: 7157, Protocol: "sv1"}}}
 	c.applyDefaults()
 	if err := saveConfig(path, c); err != nil {
 		t.Fatal(err)
@@ -377,12 +378,201 @@ func TestSoloSurvivesSaveAndLoad(t *testing.T) {
 // operator never named.
 func TestSharedAddressIsReportedAsSuch(t *testing.T) {
 	c := config{Pools: []poolConfig{
-		{Host: "127.0.0.1", Port: 23336, StatusPort: 7154},
-		{Host: "127.0.0.1", Port: 23336, StatusPort: 7155},
+		{Host: "127.0.0.1", Port: 23336, StatusPort: 7154, Protocol: "sv1"},
+		{Host: "127.0.0.1", Port: 23336, StatusPort: 7155, Protocol: "sv1"},
 	}}
 	c.applyDefaults()
 	err := c.validate()
 	if err == nil || !strings.Contains(err.Error(), "share the gateway address") {
 		t.Fatalf("err = %v, want the shared-address error", err)
+	}
+}
+
+// Omission is not a default. A config that names no protocol on a pool or a rig
+// is rejected, not silently treated as sv1 -- a setting that decides where
+// hashrate goes must be stated.
+func TestAbsentProtocolIsRejected(t *testing.T) {
+	// Pool with no protocol (rig is explicit so only the pool is at fault).
+	cp := config{
+		Pools: []poolConfig{{Name: "a", Host: "127.0.0.1", Port: 23336, StatusPort: 7154}},
+		Rigs:  []rigConfig{{Port: 23401, Protocol: "sv1"}},
+	}
+	cp.applyDefaults()
+	if err := cp.validate(); err == nil {
+		t.Fatal("a pool with no protocol was accepted; want it rejected")
+	}
+	// Rig with no protocol (pool is explicit so only the rig is at fault).
+	cr := config{
+		Pools: []poolConfig{{Name: "a", Host: "127.0.0.1", Port: 23336, StatusPort: 7154, Protocol: "sv1"}},
+		Rigs:  []rigConfig{{Port: 23401}},
+	}
+	cr.applyDefaults()
+	if err := cr.validate(); err == nil {
+		t.Fatal("a rig with no protocol was accepted; want it rejected")
+	}
+}
+
+// An SV2 pool needs its authority key to verify the gateway; without it,
+// switchyard would happily hand its hashrate to a hijacker. An SV1 pool carrying
+// one is a belief that does nothing, which this codebase refuses on principle.
+func TestPoolAuthorityKeyRules(t *testing.T) {
+	key := testAuthorityKey(t)
+	base := func(p poolConfig) config {
+		c := config{Pools: []poolConfig{p}, Rigs: []rigConfig{{Port: 23401, Protocol: "sv1"}}}
+		c.applyDefaults()
+		return c
+	}
+	for _, tc := range []struct {
+		name    string
+		pool    poolConfig
+		wantSub string // "" => must validate cleanly
+	}{
+		{"sv2 with key", poolConfig{Name: "a", Host: "h", Port: 23336, StatusPort: 7154, Protocol: "sv2", AuthorityKey: key}, ""},
+		{"sv2 without key", poolConfig{Name: "a", Host: "h", Port: 23336, StatusPort: 7154, Protocol: "sv2"}, "no authorityKey"},
+		{"sv2 bad key", poolConfig{Name: "a", Host: "h", Port: 23336, StatusPort: 7154, Protocol: "sv2", AuthorityKey: "not-a-key"}, "authority key"},
+		{"sv1 with key", poolConfig{Name: "a", Host: "h", Port: 23336, StatusPort: 7154, Protocol: "sv1", AuthorityKey: key}, "only applies to an sv2"},
+		{"no protocol", poolConfig{Name: "a", Host: "h", Port: 23336, StatusPort: 7154}, "protocol is required"},
+		{"unknown protocol", poolConfig{Name: "a", Host: "h", Port: 23336, StatusPort: 7154, Protocol: "sv3"}, "unknown protocol"},
+	} {
+		c := base(tc.pool)
+		err := c.validate()
+		if tc.wantSub == "" {
+			if err != nil {
+				t.Errorf("%s: unexpected error %v", tc.name, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
+			t.Errorf("%s: err = %v, want it to mention %q", tc.name, err, tc.wantSub)
+		}
+	}
+}
+
+// Mirror of the pool rules for a rig's own SV2 identity.
+func TestRigAuthoritySecretRules(t *testing.T) {
+	base := func(r rigConfig) config {
+		c := config{Pools: []poolConfig{{Name: "a", Host: "h", Port: 23336, StatusPort: 7154, Protocol: "sv1"}}, Rigs: []rigConfig{r}}
+		c.applyDefaults()
+		return c
+	}
+	for _, tc := range []struct {
+		name    string
+		rig     rigConfig
+		wantSub string
+	}{
+		{"sv2 with secret", rigConfig{Port: 23401, Protocol: "sv2", AuthoritySecret: testAuthoritySecret}, ""},
+		{"sv2 without secret", rigConfig{Port: 23401, Protocol: "sv2"}, "no authoritySecret"},
+		{"sv2 bad secret", rigConfig{Port: 23401, Protocol: "sv2", AuthoritySecret: "beef"}, "authority secret"},
+		{"sv1 with secret", rigConfig{Port: 23401, Protocol: "sv1", AuthoritySecret: testAuthoritySecret}, "only applies to an sv2"},
+		{"no protocol", rigConfig{Port: 23401}, "protocol is required"},
+		{"unknown protocol", rigConfig{Port: 23401, Protocol: "sv2x"}, "unknown protocol"},
+	} {
+		c := base(tc.rig)
+		err := c.validate()
+		if tc.wantSub == "" {
+			if err != nil {
+				t.Errorf("%s: unexpected error %v", tc.name, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
+			t.Errorf("%s: err = %v, want it to mention %q", tc.name, err, tc.wantSub)
+		}
+	}
+}
+
+// The divergence guarantee (see TestSavedConfigReloadsIdentically) must hold for
+// SV2 configs too: an sv2 pool and rig, keys and all, survive the disk round
+// trip byte-for-byte, or "saved in the UI" and "booted from disk" diverge.
+func TestSV2ConfigReloadsIdentically(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+
+	want := config{
+		Pools: []poolConfig{
+			{Name: "sv1pool", Host: "127.0.0.1", Port: 23336, StatusPort: 7154, Protocol: "sv1"},
+			{Name: "sv2pool", Host: "127.0.0.1", Port: 23338, StatusPort: 7156, Protocol: "sv2", AuthorityKey: testAuthorityKey(t)},
+		},
+		Rigs: []rigConfig{
+			{Port: 23401, Protocol: "sv1"},
+			{Port: 23402, Protocol: "sv2", AuthoritySecret: testAuthoritySecret},
+		},
+	}
+	want.applyDefaults()
+	if err := want.validate(); err != nil {
+		t.Fatalf("fixture is not valid: %v", err)
+	}
+	if err := saveConfig(path, want); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+	got, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("reloading what we just wrote: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("sv2 config changed across a disk round trip\n saved: %+v\nloaded: %+v", want, got)
+	}
+}
+
+// The dashboard never sends switchyard's own SV2 secret; it sends a sentinel.
+// resolveRigIdentities is what turns those sentinels into real credentials on
+// the save path, and getting it wrong either leaks a secret into the browser
+// (by not redacting) or silently wipes one (by not keeping it).
+func TestResolveRigIdentitiesResolvesSentinels(t *testing.T) {
+	existing, err := newAuthoritySecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := config{Rigs: []rigConfig{
+		{Port: 23404, Protocol: "sv2", AuthoritySecret: existing},
+	}}
+	in := &config{Rigs: []rigConfig{
+		{Port: 23404, Protocol: "sv2", AuthoritySecret: authSecretKeep},     // keep -> existing
+		{Port: 23405, Protocol: "sv2", AuthoritySecret: authSecretGenerate}, // generate -> fresh
+		{Port: 23401, Protocol: "sv1", AuthoritySecret: authSecretKeep},     // sv1 -> cleared
+		{Port: 23406, Protocol: "sv2", AuthoritySecret: existing},           // manual -> untouched
+	}}
+	if err := resolveRigIdentities(in, running); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if in.Rigs[0].AuthoritySecret != existing {
+		t.Errorf("keep did not copy the on-file secret: %q", in.Rigs[0].AuthoritySecret)
+	}
+	if s := in.Rigs[1].AuthoritySecret; s == authSecretGenerate || len(s) != 64 {
+		t.Errorf("generate did not mint a 32-byte hex secret: %q", s)
+	}
+	if _, err := in.Rigs[1].authorityPriv(); err != nil {
+		t.Errorf("generated secret is not a usable authority secret: %v", err)
+	}
+	if in.Rigs[2].AuthoritySecret != "" {
+		t.Errorf("an sv1 rig kept a sentinel secret: %q", in.Rigs[2].AuthoritySecret)
+	}
+	if in.Rigs[3].AuthoritySecret != existing {
+		t.Errorf("a hand-supplied secret was altered: %q", in.Rigs[3].AuthoritySecret)
+	}
+}
+
+func TestResolveRigIdentitiesKeepWithoutPriorFails(t *testing.T) {
+	in := &config{Rigs: []rigConfig{
+		{Port: 23404, Protocol: "sv2", AuthoritySecret: authSecretKeep},
+	}}
+	if err := resolveRigIdentities(in, config{}); err == nil {
+		t.Fatal("keeping an identity that is not on file should fail, not silently produce an empty secret")
+	}
+}
+
+// A staged secret is handed out once, to the save that resolves it, and then is
+// gone -- otherwise generated-but-unsaved secrets would pile up in memory.
+func TestStagedSecretsAreConsumedOnce(t *testing.T) {
+	s := newServer("")
+	secret, err := newAuthoritySecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.stageSecret(secret)
+	if got, ok := s.consumeStaged(h); !ok || got != secret {
+		t.Fatalf("staged secret not returned intact: got %q ok=%v", got, ok)
+	}
+	if _, ok := s.consumeStaged(h); ok {
+		t.Fatal("a staged secret must be consumable only once")
 	}
 }

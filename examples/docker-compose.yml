@@ -23,7 +23,7 @@ services:
     build: ./datum_gateway
     restart: unless-stopped
     volumes:
-      - ./gateways/pool-b:/app/config
+      - ./gateways/pool-c:/app/config
     networks: [mining]
 
   gateway-c:

@@ -115,8 +115,8 @@ func TestSigmaDegenerateInputs(t *testing.T) {
 func TestDwellCeilingMustExceedFloor(t *testing.T) {
 	base := func() config {
 		return config{
-			Pools: []poolConfig{{Name: "a", Host: "127.0.0.1", Port: 23336, StatusPort: 7154}, {Name: "b", Host: "127.0.0.1", Port: 23337, StatusPort: 7155}},
-			Rigs:  []rigConfig{{Listen: "0.0.0.0:1"}},
+			Pools: []poolConfig{{Name: "a", Host: "127.0.0.1", Port: 23336, StatusPort: 7154, Protocol: "sv1"}, {Name: "b", Host: "127.0.0.1", Port: 23337, StatusPort: 7155, Protocol: "sv1"}},
+			Rigs:  []rigConfig{{Port: 1, Protocol: "sv1"}},
 		}
 	}
 	for _, c := range []struct {

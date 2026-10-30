@@ -41,25 +41,18 @@ func (co *coordinator) outbound() []outboundConn {
 	for i, rig := range co.cfg.Rigs {
 		_ = rig
 		for j, pool := range co.cfg.Pools {
-			u := co.ups[i][j]
 			c := outboundConn{
 				Addr:    pool.stratumAddr(),
 				Pool:    pool.displayName(),
 				Rig:     co.rigLabel(i),
 				Purpose: "stratum session to this gateway",
 			}
-			u.mu.Lock()
-			if u.conn != nil {
+			if info := co.ups[i][j].connInfo(); info.connected {
 				c.Connected = true
-				if ra := u.conn.RemoteAddr(); ra != nil {
-					c.Resolved = ra.String()
-				}
-				if la := u.conn.LocalAddr(); la != nil {
-					c.Local = la.String()
-				}
-				c.Since = u.connectedAt
+				c.Resolved = info.resolved
+				c.Local = info.local
+				c.Since = info.since
 			}
-			u.mu.Unlock()
 			out = append(out, c)
 		}
 	}

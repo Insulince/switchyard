@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+
+	"github.com/btcsuite/btcd/btcec/v2"
 )
 
 // poolConfig is one upstream DATUM gateway. Note that this is the LOCAL
@@ -57,11 +59,37 @@ type poolConfig struct {
 	// further unmarked solo gateways is not stopped, those just get the
 	// ordinary "this gateway has no pool" warning.
 	Solo bool `json:"solo,omitempty"`
+
+	// Protocol is how switchyard speaks to this gateway: "sv1" or "sv2", and it
+	// is REQUIRED -- there is no default. Omission is a mistake, not a choice, so
+	// validate refuses an empty or unrecognised value rather than guessing; a
+	// setting that decides where hashrate goes must be stated, not inferred. SV2
+	// is the XBT (BLAKE2b) wire: an encrypted, authenticated Noise session.
+	Protocol string `json:"protocol"`
+
+	// AuthorityKey is the gateway's SV2 authority PUBLIC key, in the SRI
+	// base58check string the gateway prints ("configure this on miners"). It is
+	// REQUIRED when Protocol is "sv2" and forbidden otherwise: it is the only
+	// thing that lets switchyard verify it is talking to the real gateway rather
+	// than a hijacker, which is the whole point of SV2 authentication. The
+	// format is decoded and pinned in sv2key.go.
+	AuthorityKey string `json:"authorityKey,omitempty"`
 }
 
 // stratumAddr is the endpoint switchyard actually opens a socket to.
 func (p poolConfig) stratumAddr() string {
 	return net.JoinHostPort(p.hostOrDefault(), strconv.Itoa(p.Port))
+}
+
+// proto reports how switchyard speaks to this gateway. It returns the field
+// verbatim ("sv1" or "sv2"); validate guarantees it is one of those before any
+// behavioural code reads it, so there is no defaulting to hide an empty value.
+func (p poolConfig) proto() string { return p.Protocol }
+
+// authorityPub decodes the gateway's SV2 authority public key. Only meaningful
+// for an sv2 pool; validate guarantees it is present and decodable first.
+func (p poolConfig) authorityPub() (*btcec.PublicKey, error) {
+	return authorityKeyDecode(p.AuthorityKey)
 }
 
 // apiURL is the gateway's status page.
@@ -90,8 +118,11 @@ func (p poolConfig) gatewayName() string {
 // can address rigs independently -- that is the whole reason this works with
 // fewer rigs than pools.
 type rigConfig struct {
-	// Listen is the ONLY thing switchyard needs to know about a rig, and the
-	// only thing it accepts.
+	// Port is the ONLY thing switchyard needs to know about a rig, and all it
+	// accepts: the TCP port its listener binds, always on 0.0.0.0 (a rig port
+	// that answered only on loopback would be a rig no miner on the LAN could
+	// reach). There is no host field -- it is invariably the whole machine -- so
+	// the config carries the one number that varies and nothing that does not.
 	//
 	// Everything else about a miner -- its worker name, its password -- comes
 	// off the connection, because the miner already carries all of it. There
@@ -102,13 +133,120 @@ type rigConfig struct {
 	//
 	// If a miner cannot send the name a pool needs, that is a limitation of
 	// the miner, and papering over it is somebody else's job.
-	Listen string `json:"listen"`
+	Port int `json:"port"`
+
+	// Protocol is how the miner on this port speaks to switchyard: "sv1" or
+	// "sv2", and it is REQUIRED -- there is no default, and validate refuses an
+	// empty or unrecognised value. An SV2 rig is a downstream translator (or
+	// SV2-native miner) that pins switchyard's authority key over Noise.
+	Protocol string `json:"protocol"`
+
+	// AuthoritySecret is switchyard's OWN authority secret for this SV2 listener
+	// -- a 32-byte hex secp256k1 scalar whose public half the downstream
+	// translator pins. REQUIRED when Protocol is "sv2", forbidden otherwise.
+	//
+	// It is a credential and lives beside the rig's stratum password, which is
+	// why saveConfig already writes the file 0600. It is per-rig rather than
+	// global on purpose: switchyard presents one identity per downstream port,
+	// exactly as a gateway presents one authority key per SV2 listener.
+	AuthoritySecret string `json:"authoritySecret,omitempty"`
+}
+
+// proto reports how this rig's miner speaks to switchyard. It returns the field
+// verbatim ("sv1" or "sv2"); validate guarantees it is one of those before any
+// behavioural code reads it, so there is no defaulting to hide an empty value.
+func (r rigConfig) proto() string { return r.Protocol }
+
+// listenAddr is the address switchyard binds this rig's listener on: the port,
+// on every interface. A rig is reached by miners on the LAN, so it is always
+// 0.0.0.0 -- the config stores only the port, and this is where that becomes an
+// address.
+func (r rigConfig) listenAddr() string {
+	return fmt.Sprintf("0.0.0.0:%d", r.Port)
+}
+
+// authorityPriv decodes switchyard's own downstream authority secret for this
+// rig. Only meaningful for an sv2 rig; validate guarantees it is present and
+// decodable before anything calls this.
+func (r rigConfig) authorityPriv() (*btcec.PrivateKey, error) {
+	return authoritySecretDecode(r.AuthoritySecret)
+}
+
+// SV2 identity sentinels the dashboard puts in a rig's authoritySecret in place
+// of a real secret, so the secret itself never has to reach the browser.
+//
+// They are VALUES in the existing authoritySecret field, not new keys: the
+// config decoder forbids unknown keys, and a UI-only field would be one. Neither
+// is valid 32-byte hex, so a real secret can never be mistaken for one, and a
+// hand-edited config that literally contained one would simply fail to decode
+// its "secret" and be refused -- which is correct, it is not a secret.
+const (
+	authSecretKeep     = "__keep__"     // reuse the secret already on file for this listener
+	authSecretGenerate = "__generate__" // mint a fresh one on save (legacy fallback)
+	// stagedPrefix marks an authoritySecret as a handle into the server's staged
+	// store: a secret the editor generated in-screen and parked server-side, to
+	// be swapped for the real secret on save (see server.consumeStaged). It is a
+	// VALUE prefix in the authoritySecret field, like the sentinels above.
+	stagedPrefix = "__staged__:"
+)
+
+// resolveRigIdentities turns the dashboard's SV2 identity sentinels into real
+// authority secrets before the incoming config is validated or written:
+// __generate__ mints a fresh secret, __keep__ copies the one already on file for
+// that listener, and a hand-supplied hex secret is left untouched. It runs on
+// the save path only (see saveAndReload), so by the time validate runs, every
+// secret is real -- the sentinels never reach disk or the validator.
+//
+// running is the config switchyard is serving right now, the source of the
+// "keep" secrets. Listeners are matched by port, which is a rig's whole stable
+// identity across an edit.
+func resolveRigIdentities(incoming *config, running config) error {
+	prior := map[int]string{}
+	for _, r := range running.Rigs {
+		if r.AuthoritySecret != "" {
+			prior[r.Port] = r.AuthoritySecret
+		}
+	}
+	for i := range incoming.Rigs {
+		r := &incoming.Rigs[i]
+		if r.proto() != "sv2" {
+			// A sentinel left behind by an sv2 -> sv1 flip is not a credential;
+			// drop it so validate does not reject the sv1 rig for carrying one.
+			if r.AuthoritySecret == authSecretKeep || r.AuthoritySecret == authSecretGenerate {
+				r.AuthoritySecret = ""
+			}
+			continue
+		}
+		switch r.AuthoritySecret {
+		case authSecretGenerate:
+			secret, err := newAuthoritySecret()
+			if err != nil {
+				return fmt.Errorf("rig %d: minting SV2 authority identity: %w", r.Port, err)
+			}
+			r.AuthoritySecret = secret
+		case authSecretKeep:
+			prev := prior[r.Port]
+			if prev == "" {
+				return fmt.Errorf("rig %d: asked to keep its SV2 identity, but none is on file "+
+					"for this port -- generate one or provide your own", r.Port)
+			}
+			r.AuthoritySecret = prev
+		}
+		// Anything else is a hand-supplied secret; validate checks its format.
+	}
+	return nil
 }
 
 type config struct {
-	// StatusListen serves a small JSON status document. Handy on its own,
-	// and the obvious thing for blockwatch to consume later.
-	StatusListen string `json:"statusListen"`
+	// DashboardPort is the TCP port the dashboard (and its /status JSON) serves on.
+	DashboardPort int `json:"dashboardPort"`
+
+	// DashboardHost is the bind host for the dashboard. Empty (the default) binds
+	// every interface, so the page stays reachable from another device on the LAN.
+	// Set it to "127.0.0.1" to bind loopback only -- the way to keep the admin
+	// surface off the LAN (the state-changing endpoints are unauthenticated),
+	// reaching it over an SSH tunnel or an authenticated reverse proxy instead.
+	DashboardHost string `json:"dashboardHost,omitempty"`
 
 	Pools []poolConfig `json:"pools"`
 	Rigs  []rigConfig  `json:"rigs"`
@@ -140,28 +278,7 @@ type config struct {
 	// engineering around.
 	MaxDwellSeconds int `json:"maxDwellSeconds"`
 
-	// VersionRollingMask is the ASICBoost mask negotiated upstream on behalf
-	// of the rigs. Empty (the default, and almost certainly what you want)
-	// disables version rolling negotiation entirely.
-	//
-	// LEAVE THIS EMPTY UNLESS EVERY RIG USES VERSION ROLLING. It has to be
-	// negotiated on the upstream session at connect time, long before any rig
-	// exists, because mining.configure is only legal before mining.subscribe
-	// and cannot be renegotiated later. But the gateway treats the extension
-	// as a contract in both directions -- datum_stratum.c:1255:
-	//
-	//	if (m->extension_version_rolling) {
-	//	    vroll = json_array_get(params_obj, 5);
-	//	    if (!vroll) { send_bad_version_error(...); }
-	//
-	// So negotiating it upstream makes the gateway REQUIRE params[5] on every
-	// mining.submit. A rig that never asked for version rolling sends five
-	// params, and every single share it submits is rejected as bad-version.
-	// Enabling this speculatively is a 100% reject rate, not a lost
-	// optimisation.
-	VersionRollingMask string `json:"versionRollingMask"`
-
-	// PollSeconds is how often the dashboard refetches /status.
+	// DashboardPollSeconds is how often the dashboard refetches /status.
 	//
 	// The default of 2s is chosen against what actually changes. Rotations are
 	// the fast event and they are driven by blocks, so the thing a viewer is
@@ -174,7 +291,12 @@ type config struct {
 	// noticing. It is exposed because "how live is live" is a taste question,
 	// not because the default is a compromise. Below about 0.5s the animations
 	// start to overlap themselves and it reads as jitter.
-	PollSeconds float64 `json:"pollSeconds"`
+	//
+	// Named for the dashboard specifically so it is never confused with
+	// gatewayPollSeconds, which is a different thing on a different cadence:
+	// this is the browser re-rendering, that is switchyard reading each
+	// gateway's status page.
+	DashboardPollSeconds float64 `json:"dashboardPollSeconds"`
 
 	// GatewayPollSeconds is how often each gateway's status page is read for
 	// the pool-side share counters.
@@ -268,11 +390,11 @@ func (c *config) applyDefaults() {
 	if c.MaxDwellSeconds <= 0 {
 		c.MaxDwellSeconds = 900
 	}
-	if c.PollSeconds <= 0 {
-		c.PollSeconds = 2
+	if c.DashboardPollSeconds <= 0 {
+		c.DashboardPollSeconds = 2
 	}
-	if c.PollSeconds < 0.5 {
-		c.PollSeconds = 0.5
+	if c.DashboardPollSeconds < 0.5 {
+		c.DashboardPollSeconds = 0.5
 	}
 	if c.DialTimeoutSeconds <= 0 {
 		c.DialTimeoutSeconds = 10
@@ -296,10 +418,10 @@ func (c *config) applyDefaults() {
 	// operator to open a URL that refuses the connection -- with the process
 	// itself logging that it is listening.
 	//
-	// The narrower default was safer and unusable, which is not safer. Anyone
-	// who wants loopback writes it in the file; the field's help says so.
-	if c.StatusListen == "" {
-		c.StatusListen = ":7160"
+	// The narrower default was safer and unusable, which is not safer. The port
+	// is all that is configurable now; the bind is always every interface.
+	if c.DashboardPort <= 0 {
+		c.DashboardPort = 7160
 	}
 	// Deliberately does NOT derive User from Name. An empty User means "use
 	// whatever the miner authorises with", which is the default and the point;
@@ -352,6 +474,33 @@ func (c *config) validate() error {
 			return fmt.Errorf("pool %d (%s): stratum and status ports are both %d; they are "+
 				"different services on the gateway", i, p.displayName(), p.Port)
 		}
+		// An authority key is the gateway's SV2 identity and means nothing to an
+		// SV1 gateway. Required for sv2 (switchyard cannot verify the gateway
+		// without it, and an unverified gateway is the hijack this prevents);
+		// refused for sv1, because a key sitting on an SV1 pool is a belief the
+		// operator holds that does nothing -- the same failure the unknown-key
+		// rule guards against, one level down.
+		switch p.proto() {
+		case "":
+			return fmt.Errorf("pool %d (%s): protocol is required (\"sv1\" or \"sv2\"); "+
+				"switchyard does not assume one", i, p.displayName())
+		case "sv1":
+			if p.AuthorityKey != "" {
+				return fmt.Errorf("pool %d (%s): authorityKey is set but protocol is sv1; "+
+					"an authority key only applies to an sv2 gateway", i, p.displayName())
+			}
+		case "sv2":
+			if p.AuthorityKey == "" {
+				return fmt.Errorf("pool %d (%s): protocol is sv2 but no authorityKey; "+
+					"switchyard cannot verify the gateway's identity without it", i, p.displayName())
+			}
+			if _, err := p.authorityPub(); err != nil {
+				return fmt.Errorf("pool %d (%s): %w", i, p.displayName(), err)
+			}
+		default:
+			return fmt.Errorf("pool %d (%s): unknown protocol %q (want \"sv1\" or \"sv2\")",
+				i, p.displayName(), p.Protocol)
+		}
 		if p.Solo {
 			solos++
 			if p.Name != "" {
@@ -378,18 +527,43 @@ func (c *config) validate() error {
 	if solos > 1 {
 		return fmt.Errorf("only one pool can be solo (%d are marked solo)", solos)
 	}
-	seenListen := map[string]bool{}
+	seenPort := map[int]bool{}
 	for i, r := range c.Rigs {
-		if r.Listen == "" {
+		if r.Port <= 0 || r.Port > 65535 {
 			return fmt.Errorf("rig %d: a listen port is required", i)
+		}
+		// The authority secret is switchyard's own SV2 identity for this port.
+		// Required for sv2 (there is no downstream Noise session to present
+		// without it); refused for sv1, where it would be a credential doing
+		// nothing.
+		switch r.proto() {
+		case "":
+			return fmt.Errorf("rig %d (port %d): protocol is required (\"sv1\" or \"sv2\"); "+
+				"switchyard does not assume one", i, r.Port)
+		case "sv1":
+			if r.AuthoritySecret != "" {
+				return fmt.Errorf("rig %d (port %d): authoritySecret is set but protocol is sv1; "+
+					"it only applies to an sv2 listener", i, r.Port)
+			}
+		case "sv2":
+			if r.AuthoritySecret == "" {
+				return fmt.Errorf("rig %d (port %d): protocol is sv2 but no authoritySecret; "+
+					"switchyard needs its own authority identity to present downstream", i, r.Port)
+			}
+			if _, err := r.authorityPriv(); err != nil {
+				return fmt.Errorf("rig %d (port %d): %w", i, r.Port, err)
+			}
+		default:
+			return fmt.Errorf("rig %d (port %d): unknown protocol %q (want \"sv1\" or \"sv2\")",
+				i, r.Port, r.Protocol)
 		}
 		// Two rigs on one port is the one arrangement that cannot work: the
 		// second listener never binds, and the miner pointed at it is
 		// silently connected to the wrong rig's slot.
-		if seenListen[r.Listen] {
-			return fmt.Errorf("two rigs share listen address %q", r.Listen)
+		if seenPort[r.Port] {
+			return fmt.Errorf("two rigs share listen port %d", r.Port)
 		}
-		seenListen[r.Listen] = true
+		seenPort[r.Port] = true
 	}
 	return nil
 }
@@ -530,8 +704,8 @@ func (c *config) validateRaw() error {
 	if c.MaxDwellSeconds < 0 {
 		return fmt.Errorf("dwell ceiling cannot be negative (got %ds)", c.MaxDwellSeconds)
 	}
-	if c.PollSeconds < 0 {
-		return fmt.Errorf("dashboard refresh cannot be negative (got %gs)", c.PollSeconds)
+	if c.DashboardPollSeconds < 0 {
+		return fmt.Errorf("dashboard refresh cannot be negative (got %gs)", c.DashboardPollSeconds)
 	}
 	if c.DialTimeoutSeconds < 0 {
 		return fmt.Errorf("dial timeout cannot be negative (got %ds)", c.DialTimeoutSeconds)
@@ -568,4 +742,10 @@ func (p poolConfig) displayName() string {
 // gatewayPoll is how often to read each gateway's status page.
 func (c *config) gatewayPoll() time.Duration {
 	return time.Duration(c.GatewayPollSeconds) * time.Second
+}
+
+// dashboardAddr is the address the dashboard binds: DashboardHost (empty = every
+// interface) and the configured port.
+func (c *config) dashboardAddr() string {
+	return net.JoinHostPort(c.DashboardHost, strconv.Itoa(c.DashboardPort))
 }

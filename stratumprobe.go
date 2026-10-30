@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"time"
+
+	"github.com/Insulince/switchyard/sv2/noise"
 )
 
 // probeStratum answers the question the status page cannot: is the port you
@@ -72,9 +75,12 @@ func probeStratum(ctx context.Context, addr string) error {
 		}
 		if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
 			// Not JSON at all. An HTTP server lands here, which is exactly the
-			// mistake this check was written for.
-			return fmt.Errorf("port %s answered, but not as a stratum server "+
-				"— check you have not used the status port here", portOf(addr))
+			// mistake this check was written for -- and so is an SV2 gateway,
+			// which reads the subscribe as a Noise act-1 and replies in binary,
+			// so name that possibility too (this is the SV1 probe; an SV2 pool
+			// uses probeStratumSV2 instead).
+			return fmt.Errorf("port %s answered, but not as an SV1 stratum server "+
+				"— is this an SV2 endpoint, or the status port?", portOf(addr))
 		}
 		// A gateway may push set_difficulty or notify before answering the
 		// subscribe. Those are proof enough on their own, but keep reading for
@@ -101,6 +107,49 @@ func probeStratum(ctx context.Context, addr string) error {
 	// the single most likely thing on the other end of a wrong number here.
 	return fmt.Errorf("port %s is open but did not answer a stratum subscribe "+
 		"— is that really the miner port?", portOf(addr))
+}
+
+// probeStratumSV2 is the SV2 analogue of probeStratum: it confirms the port is a
+// gateway speaking Stratum V2, not V1. The two wires are incompatible, which is
+// the whole bug this fixes -- the V1 subscribe above reads as a Noise act-1 to an
+// SV2 responder, which replies in binary that never parses, so a perfectly good
+// SV2 gateway got reported as "not a stratum server". Here we instead speak the
+// SV2 handshake: write act 1, read act 2, and run it through an initiator with NO
+// pinned authority key (nil), so this answers only "is an SV2 gateway here?" and
+// never "is the key the right one?" -- that stays the Test-this-key button's job,
+// and so clock skew on the certificate cannot make this check fail either.
+func probeStratumSV2(ctx context.Context, addr string) error {
+	dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var d net.Dialer
+	conn, err := d.DialContext(dctx, "tcp", addr)
+	if err != nil {
+		n, _ := strconv.Atoi(portOf(addr))
+		return errors.New(shortReachError(err, n))
+	}
+	defer func() { _ = conn.Close() }()
+	if dl, ok := dctx.Deadline(); ok {
+		_ = conn.SetDeadline(dl)
+	}
+
+	ini, act1, err := noise.NewInitiator(nil)
+	if err != nil {
+		return err
+	}
+	if _, err := conn.Write(act1[:]); err != nil {
+		return fmt.Errorf("port %s accepted the connection then dropped it", portOf(addr))
+	}
+	act2 := make([]byte, sv2Act2Size)
+	if _, err := io.ReadFull(conn, act2); err != nil {
+		return fmt.Errorf("port %s answered, but not as an SV2 gateway "+
+			"— is this an SV1 endpoint?", portOf(addr))
+	}
+	if _, err := ini.ProcessAct2(act2, uint32(time.Now().Unix())); err != nil {
+		return fmt.Errorf("port %s answered, but not as an SV2 gateway "+
+			"— is this an SV1 endpoint?", portOf(addr))
+	}
+	return nil
 }
 
 // portOf is for messages only: the operator typed a port, so a failure should

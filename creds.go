@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -151,7 +152,7 @@ func (co *coordinator) noteCredentials(rigIdx int, user, pass string) {
 // as the miners' own retry backoff. A name never seen here, arriving on an
 // empty port, is a lone miner renaming itself, and is honoured exactly as it
 // was before ports could hold more than one miner.
-func (co *coordinator) noteAuthorise(rigIdx int, s *rigSession, user, pass string) {
+func (co *coordinator) noteAuthorise(rigIdx int, s downstreamSession, user, pass string) {
 	if rigIdx < 0 || rigIdx >= len(co.creds) {
 		return
 	}
@@ -187,7 +188,7 @@ func (co *coordinator) rigLabel(rigIdx int) string {
 	// Nothing has connected yet, so there is no name to show -- and inventing
 	// one from config would be inventing an identity. The port is the only
 	// thing that exists before a miner does, and it is unique by validation.
-	return "port " + portOf(co.cfg.Rigs[rigIdx].Listen)
+	return "port " + strconv.Itoa(co.cfg.Rigs[rigIdx].Port)
 }
 
 // credsKnown reports whether this rig has ever told us who it is.

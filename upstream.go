@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -31,9 +32,14 @@ const upstreamIdleTimeout = 5 * time.Minute
 // pendingSubmit remembers who asked, so a gateway's reply can be routed back
 // to the right rig with the id that rig used. Upstream ids are ours; rigs
 // have their own numbering and we must not leak one into the other.
+//
+// Exactly one of sess / resCh is set. sess is an SV1 downstream, answered by a
+// stratum line with downID; resCh is a canonical (SV2) downstream, answered by a
+// value on the channel. Either way the accounting is identical.
 type pendingSubmit struct {
 	sess   *rigSession
 	downID json.RawMessage
+	resCh  chan sv2SubmitResult
 	// diff is what this share is worth if accepted: the difficulty of the
 	// job it was mined on. See jobDiff.
 	diff uint64
@@ -160,18 +166,39 @@ type upstream struct {
 	// dark reads as still receiving hashrate for several more minutes -- the
 	// exact claim a flow diagram must not make.
 	boundAt time.Time
+
+	// --- canonical (SV2) downstream support: the SV2-rig -> SV1-pool cell ---
+	//
+	// When an SV2 rig binds here, canonSink is its session and the SV1 work this
+	// link receives is synthesised into an sv2Work and pushed to it. It is
+	// mutually exclusive with the SV1 sessions map: one miner per port. The job
+	// maps bridge the gateway's opaque SV1 job strings to the uint32 ids an SV2
+	// channel uses, so a share names the exact job it was mined on.
+	canonSink     canonDownstream
+	lastNotifyRaw json.RawMessage // params of the most recent notify, for synthesis
+	canonJobFwd   map[string]uint32
+	canonJobRev   map[uint32]string
+	canonJobOrder []uint32
+	canonNextJob  uint32
 }
+
+// canonChannelID is the channel id switchyard presents to an SV2 rig bound to an
+// SV1 pool. The value is arbitrary -- one port is one channel -- but it must be
+// stable for the session, so a constant is exactly right.
+const canonChannelID uint32 = 1
 
 func newUpstream(co *coordinator, rigIdx, poolIdx int, rig rigConfig, pool poolConfig) *upstream {
 	return &upstream{
-		pool:     pool,
-		rig:      rig,
-		rigIdx:   rigIdx,
-		poolIdx:  poolIdx,
-		co:       co,
-		pending:  map[uint64]pendingSubmit{},
-		jobDiff:  map[string]uint64{},
-		sessions: map[*rigSession]int{},
+		pool:        pool,
+		rig:         rig,
+		rigIdx:      rigIdx,
+		poolIdx:     poolIdx,
+		co:          co,
+		pending:     map[uint64]pendingSubmit{},
+		jobDiff:     map[string]uint64{},
+		sessions:    map[*rigSession]int{},
+		canonJobFwd: map[string]uint32{},
+		canonJobRev: map[uint32]string{},
 	}
 }
 
@@ -327,27 +354,14 @@ func (u *upstream) handshake(sc *bufio.Scanner, conn net.Conn) error {
 	_ = conn.SetDeadline(time.Now().Add(u.co.cfg.dialTimeout()))
 	defer func() { _ = conn.SetDeadline(time.Time{}) }()
 
-	if mask := u.co.cfg.VersionRollingMask; mask != "" {
-		req := fmt.Sprintf(`{"id":1,"method":"mining.configure","params":[["version-rolling"],{"version-rolling.mask":"%s"}]}`, mask)
-		if err := u.w.writeLine([]byte(req)); err != nil {
-			return err
-		}
-		// A gateway that does not implement mining.configure is not an
-		// error worth failing the whole session over -- we simply mine
-		// without version rolling, which costs a little efficiency and
-		// nothing else.
-		resp, err := u.readUntilResponse(sc, "1")
-		switch {
-		case err != nil:
-			u.logf("version rolling unavailable: %v", err)
-		case len(resp.Error) > 0 && string(resp.Error) != "null":
-			u.logf("version rolling refused: %s", resp.Error)
-		default:
-			u.mu.Lock()
-			u.configureResult = resp.Result
-			u.mu.Unlock()
-		}
-	}
+	// No mining.configure / version-rolling negotiation. switchyard never
+	// negotiates version rolling upstream: the gateway treats the extension as a
+	// contract in both directions (datum_stratum.c:1255), so once negotiated it
+	// REQUIRES params[5] on every submit -- and a rig that never asked for it
+	// sends five params and has every share rejected as bad-version. There is no
+	// safe way to enable it unless every rig uses it, so the option does not
+	// exist. configureResult therefore stays nil, and the downstream configure
+	// reply reflects that (no version rolling offered).
 
 	if err := u.w.writeLine([]byte(`{"id":2,"method":"mining.subscribe","params":["switchyard/1.0"]}`)); err != nil {
 		return err
@@ -478,10 +492,15 @@ func (u *upstream) handleNotification(m *message, line []byte) {
 		// job arrives, and every caller getting the ownership right is a
 		// weaker guarantee than not needing them to.
 		u.lastNotify = append([]byte(nil), line...)
+		u.lastNotifyRaw = append(json.RawMessage(nil), m.Params...)
 		bound := u.sessionsLocked()
+		canon, canonWork, haveCanon := u.canonPushLocked()
 		u.mu.Unlock()
 		for _, s := range bound {
 			s.push(line)
+		}
+		if haveCanon {
+			canon.pushWork(canonWork)
 		}
 
 	case "mining.set_difficulty":
@@ -512,6 +531,9 @@ func (u *upstream) handleNotification(m *message, line []byte) {
 		u.lastDiff = line
 		u.diff = d
 		bound := u.sessionsLocked()
+		// A difficulty change is a new target for an SV2 downstream; re-push the
+		// current work carrying it.
+		canon, canonWork, haveCanon := u.canonPushLocked()
 		u.mu.Unlock()
 		// Difficulty is the one push worth logging: it is rare, and a rig
 		// working at a difficulty the gateway is not expecting is invisible
@@ -521,6 +543,9 @@ func (u *upstream) handleNotification(m *message, line []byte) {
 		}
 		for _, s := range bound {
 			s.push(line)
+		}
+		if haveCanon {
+			canon.pushWork(canonWork)
 		}
 
 	case "mining.set_extranonce":
@@ -582,6 +607,19 @@ func (u *upstream) routeResponse(m *message) {
 		u.co.feed.publish(shareEvent{Kind: "gw", Rig: u.rigIdx, Pool: u.poolIdx, N: 1})
 	}
 	if !ok {
+		return
+	}
+	// A canonical (SV2) downstream is answered on its channel, not with a
+	// stratum line. Accounting above is identical either way.
+	if p.resCh != nil {
+		code := ""
+		if !accepted {
+			code = "rejected"
+			if len(m.Error) > 0 && string(m.Error) != "null" {
+				code = string(m.Error)
+			}
+		}
+		p.resCh <- sv2SubmitResult{OK: accepted, Code: code}
 		return
 	}
 	res := m.Result
@@ -770,6 +808,192 @@ func (u *upstream) isReady() bool {
 	return u.ready
 }
 
+// --- canonical (SV2) downstream: the SV2-rig -> SV1-pool translate cell ---
+
+// canonPushLocked returns the work to push to a bound SV2 downstream, if one is
+// bound and there is translatable work. Caller holds u.mu; the push happens after
+// the lock is dropped.
+func (u *upstream) canonPushLocked() (sink canonDownstream, w sv2Work, ok bool) {
+	if u.canonSink == nil {
+		return nil, sv2Work{}, false
+	}
+	if w, ok = u.synthCanonWorkLocked(); !ok {
+		return nil, sv2Work{}, false
+	}
+	return u.canonSink, w, true
+}
+
+// synthCanonWorkLocked builds an sv2Work from this SV1 session's current state:
+// commitment and header fields from the last notify, the extranonce prefix from
+// the subscribe, the target from the current difficulty. Caller holds u.mu. ok is
+// false when there is no translatable XBT job yet. The header byte orders and the
+// difficulty->target relation here are per spec but confirmed on the live run
+// against a gateway, not by the leaf-equivalence proof.
+func (u *upstream) synthCanonWorkLocked() (sv2Work, bool) {
+	if u.lastNotifyRaw == nil || !u.ready {
+		return sv2Work{}, false
+	}
+	en1, err := hex.DecodeString(u.extranonce1)
+	if err != nil {
+		return sv2Work{}, false
+	}
+	sv1Job, j, err := sv1NotifyToJob(u.lastNotifyRaw, en1, u.extranonce2Size)
+	if err != nil {
+		return sv2Work{}, false // not XBT work this can translate
+	}
+	diff := u.diff
+	if diff == 0 {
+		diff = 1
+	}
+	return sv2Work{
+		ChannelID:        canonChannelID,
+		ExtranoncePrefix: en1,
+		JobID:            u.canonJobIDLocked(sv1Job),
+		Commitment:       j.Commitment,
+		PrevHash:         j.PrevHash,
+		Ntime:            j.Ntime,
+		Nbits:            j.Nbits,
+		Target:           difficultyToTarget(diff),
+		Clean:            j.Clean,
+		Ready:            true,
+	}, true
+}
+
+// canonJobIDLocked maps a gateway SV1 job string to a stable uint32 an SV2
+// channel can carry, assigning a new id (and evicting the oldest) on first sight,
+// so a share names the exact job it was mined on. Caller holds u.mu.
+func (u *upstream) canonJobIDLocked(sv1Job string) uint32 {
+	if id, ok := u.canonJobFwd[sv1Job]; ok {
+		return id
+	}
+	u.canonNextJob++
+	id := u.canonNextJob
+	u.canonJobFwd[sv1Job] = id
+	u.canonJobRev[id] = sv1Job
+	u.canonJobOrder = append(u.canonJobOrder, id)
+	if len(u.canonJobOrder) > jobDiffMemory {
+		old := u.canonJobOrder[0]
+		u.canonJobOrder = u.canonJobOrder[1:]
+		delete(u.canonJobFwd, u.canonJobRev[old])
+		delete(u.canonJobRev, old)
+	}
+	return id
+}
+
+// attachCanon binds an SV2 rig session to this SV1 pool and returns the current
+// work for its channel-open. One miner per port: refused if any miner is already
+// bound. Mirror of sv2Link.attachCanon so the coordinator cannot tell them apart.
+func (u *upstream) attachCanon(d canonDownstream) (sv2Work, bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if !u.ready {
+		return sv2Work{}, false
+	}
+	if len(u.sessions) > 0 || u.canonSink != nil {
+		u.logf("port already has a miner; refusing an SV2 bind (one miner per port)")
+		return sv2Work{}, false
+	}
+	w, ok := u.synthCanonWorkLocked()
+	if !ok {
+		return sv2Work{}, false
+	}
+	u.canonSink = d
+	u.boundAt = time.Now()
+	u.buckets = [rateBuckets]uint64{}
+	u.bucketAt, u.bucketStart = 0, time.Time{}
+	return w, true
+}
+
+func (u *upstream) detachCanon(d canonDownstream) {
+	u.mu.Lock()
+	if u.canonSink == d {
+		u.canonSink = nil
+		u.boundAt = time.Time{}
+	}
+	u.mu.Unlock()
+}
+
+// submitCanon translates an SV2 rig's share into an SV1 mining.submit under this
+// session's own authorised identity and returns a channel for the gateway's
+// verdict. The reply is routed back through routeResponse like any other submit.
+func (u *upstream) submitCanon(jobID uint32, nonce, ntime uint64, extranonce []byte) (<-chan sv2SubmitResult, error) {
+	u.mu.Lock()
+	sv1Job, ok := u.canonJobRev[jobID]
+	if !ok {
+		u.mu.Unlock()
+		return nil, fmt.Errorf("sv2 submit names unknown job id %d", jobID)
+	}
+	if !u.ready || u.w == nil {
+		u.mu.Unlock()
+		return nil, fmt.Errorf("gateway %s not ready", u.pool.displayName())
+	}
+	worth, known := u.jobDiff[sv1Job]
+	if !known {
+		worth = u.diff
+	}
+	u.nextID++
+	u.submitted++
+	id := u.nextID + 100
+	resCh := make(chan sv2SubmitResult, 1)
+	u.pending[id] = pendingSubmit{resCh: resCh, diff: worth}
+	w := u.w
+	user := u.user
+	u.mu.Unlock()
+
+	params, err := shareToSV1SubmitParams(user, sv1Job, canonShare{Nonce: nonce, Ntime: ntime, Extranonce: extranonce})
+	if err != nil {
+		u.failPending(id, err.Error())
+		return resCh, nil
+	}
+	if err := w.writeLine([]byte(fmt.Sprintf(`{"id":%d,"method":"mining.submit","params":%s}`, id, params))); err != nil {
+		u.failPending(id, err.Error())
+	}
+	return resCh, nil
+}
+
+// failPending resolves and removes one pending submit with a failure, for a
+// canonical submit's local errors (the gateway never saw an id we never sent).
+func (u *upstream) failPending(id uint64, code string) {
+	u.mu.Lock()
+	p, ok := u.pending[id]
+	delete(u.pending, id)
+	u.mu.Unlock()
+	if ok && p.resCh != nil {
+		p.resCh <- sv2SubmitResult{OK: false, Code: code}
+	}
+}
+
+// displayName is this link's pool label. It exists so callers reach the name
+// through the poolLink surface rather than through u.pool, which the interface
+// does not expose.
+func (u *upstream) displayName() string {
+	return u.pool.displayName()
+}
+
+// connInfo snapshots this link's outbound socket under u.mu, for outbound().
+// Taking the lock here, inside the type that owns the socket, is what lets the
+// interface hide the mutex and the net.Conn that outbound() used to read
+// directly.
+func (u *upstream) connInfo() linkConn {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	c := linkConn{since: u.connectedAt}
+	if u.conn != nil {
+		c.connected = true
+		if ra := u.conn.RemoteAddr(); ra != nil {
+			c.resolved = ra.String()
+		}
+		if la := u.conn.LocalAddr(); la != nil {
+			c.local = la.String()
+		}
+	}
+	return c
+}
+
+// *upstream is the SV1 poolLink. The assertion keeps the two in step: a method
+// that drifts from the interface fails to build here rather than at a call site.
+var _ poolLink = (*upstream)(nil)
+
 // statsAt snapshots everything the dashboard needs from one upstream under a
 // single lock, so the numbers it renders are mutually consistent. The windowed
 // rate needs a clock, which is why this takes one rather than being a field.
@@ -879,7 +1103,7 @@ func (u *upstream) advanceLocked(now time.Time) {
 const minRateSpan = 60 * time.Second
 
 func (u *upstream) recentThsLocked(now time.Time) float64 {
-	if len(u.sessions) == 0 || u.boundAt.IsZero() {
+	if (len(u.sessions) == 0 && u.canonSink == nil) || u.boundAt.IsZero() {
 		return 0
 	}
 	u.advanceLocked(now)

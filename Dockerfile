@@ -1,6 +1,8 @@
-# switchyard has no third-party dependencies, so there is no go.sum to copy
-# and no module download step -- the build is just the toolchain and these
-# source files.
+# switchyard's only third-party dependencies are the SV2 crypto libraries
+# (github.com/btcsuite/btcd/btcec/v2 and golang.org/x/crypto) -- the minimum the
+# SV2 Noise suite needs, kept to that one purpose. go.mod and
+# go.sum pin them; the build fetches them from the module proxy and verifies
+# them against go.sum, which is why BOTH files are copied before the build.
 # BUILDPLATFORM, not the target: the builder runs natively and Go cross-
 # compiles. Without this the arm64 image is produced by running the entire
 # compile inside an emulated arm64 container under QEMU -- many times slower,
@@ -9,8 +11,13 @@
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
 COPY *.go ./
+# The SV2 transport and codec live in subpackages (sv2/noise, framing, common,
+# types, mining); the root package imports them, so the tree has to be copied
+# too -- the old `COPY *.go` only reached the root files from the pre-SV2,
+# single-package era.
+COPY sv2/ ./sv2/
 # The status page is go:embed'ed, so it is a build input, not a runtime asset.
 COPY index.html ./
 

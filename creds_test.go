@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -85,17 +86,46 @@ func TestUnchangedCredentialsDoNotChurnSessions(t *testing.T) {
 	}
 }
 
-// There is no override, and that is the point worth pinning: a rig is
-// described by a port and nothing else, so there is no field through which
-// switchyard could substitute a worker name even if someone wanted it to.
+// There is no identity override, and that is the point worth pinning: switchyard
+// must have no field through which it could substitute a worker name, password
+// or payout address -- what the miner sends is what goes upstream.
+//
+// This guards the invariant semantically rather than by field count, so it keeps
+// catching the thing that matters (a sneaked-in User/Worker/PayoutAddress field)
+// while still allowing a consciously-reviewed addition: the field's name just has
+// to be added to the allowlist here, which forces the reviewer to look at it.
+//
+// The SV2 transport fields are on that allowlist on purpose. Protocol and
+// AuthoritySecret are switchyard's OWN Noise identity for the downstream session
+// -- the key a translator pins to know it reached switchyard. They do not touch
+// the miner's identity: the SV2 user_identity passes through unaltered, exactly
+// as the SV1 username does. A worker/payout field would be a different thing and
+// must still trip this test.
 func TestARigIsDescribedByItsPortAlone(t *testing.T) {
-	var r rigConfig
-	if n := reflect.TypeOf(r).NumField(); n != 1 {
-		t.Errorf("rigConfig has %d fields, want exactly 1 (listen)", n)
+	allowed := map[string]bool{
+		"Port":            true, // the listen port, and the whole point
+		"Protocol":        true, // sv1|sv2 wire selection (switchyard's own transport)
+		"AuthoritySecret": true, // switchyard's own downstream Noise identity
 	}
-	if reflect.TypeOf(r).Field(0).Name != "Listen" {
-		t.Errorf("rigConfig's only field is %q, want Listen",
-			reflect.TypeOf(r).Field(0).Name)
+	// Names that would mean switchyard substitutes the MINER's identity. None of
+	// these may ever appear on rigConfig, whatever they are called.
+	forbidden := []string{"user", "worker", "name", "pass", "address", "payout", "account", "wallet"}
+
+	rt := reflect.TypeOf(rigConfig{})
+	for i := 0; i < rt.NumField(); i++ {
+		f := rt.Field(i)
+		if !allowed[f.Name] {
+			t.Errorf("rigConfig has an unreviewed field %q; a rig is its port plus its own "+
+				"transport identity and nothing else -- if this is deliberate, add it to the "+
+				"allowlist here and say why", f.Name)
+		}
+		lower := strings.ToLower(f.Name)
+		for _, bad := range forbidden {
+			if strings.Contains(lower, bad) {
+				t.Errorf("rigConfig field %q looks like a miner-identity override (%q); switchyard "+
+					"forwards the miner's name, it does not substitute one", f.Name, bad)
+			}
+		}
 	}
 }
 
@@ -119,9 +149,8 @@ func TestRigLabelIsThePortUntilAMinerSpeaks(t *testing.T) {
 // nothing but the port its miner connects to.
 func portOnlyConfig() config {
 	c := config{
-		StatusListen: "127.0.0.1:0",
-		Pools:        []poolConfig{{Name: "lazarus", Host: "127.0.0.1", Port: 23338, StatusPort: 7156}},
-		Rigs:         []rigConfig{{Listen: "0.0.0.0:23401"}},
+		Pools: []poolConfig{{Name: "lazarus", Host: "127.0.0.1", Port: 23338, StatusPort: 7156, Protocol: "sv1"}},
+		Rigs:  []rigConfig{{Port: 23401, Protocol: "sv1"}},
 	}
 	c.applyDefaults()
 	return c
