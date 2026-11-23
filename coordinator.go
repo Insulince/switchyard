@@ -45,11 +45,20 @@ type coordinator struct {
 	// the supervisor; nil outside one.
 	refuse func(error)
 
+	// gwKick asks watchGateways for an immediate read; noteBlock sends on it
+	// so a new tip's height is not a whole poll interval behind the tip.
+	gwKick chan struct{}
+
 	mu           sync.Mutex
 	step         int
 	rotations    int
 	lastPrevhash string
 	lastRotate   time.Time
+	// tipHeight is the chain height of the block whose hidden prevhash is
+	// tipHeightOf. Kept as a pair so a height is only ever shown against the
+	// tip it was read for: see noteGatewayTip.
+	tipHeight   uint64
+	tipHeightOf string
 	// sessions is every miner bound on each rig port. A port is one virtual
 	// rig however many machines sit behind it; the slice is only so the
 	// dashboard can say how many. The element is a downstreamSession so an SV1
@@ -132,6 +141,7 @@ func newCoordinator(cfg config) *coordinator {
 		base:         randomBalancedStart(len(cfg.Rigs), len(cfg.Pools)),
 	}
 	co.gw = newGatewayWatcher()
+	co.gwKick = make(chan struct{}, 1)
 	co.creds = make([]*credState, len(cfg.Rigs))
 	for i := range co.creds {
 		co.creds[i] = newCredState()
@@ -450,6 +460,13 @@ func (co *coordinator) noteBlock(prevhash string) {
 	}
 	first := co.lastPrevhash == ""
 	co.lastPrevhash = prevhash
+	// Ask for the new tip's height now. Non-blocking: one pending read
+	// covers any number of blocks, and a coordinator with no poller running
+	// (tests, a nil channel) simply skips it.
+	select {
+	case co.gwKick <- struct{}{}:
+	default:
+	}
 	if first {
 		// The first job we ever see is not a block arriving, it is us
 		// arriving. Rotating on it would throw away a fresh assignment.
@@ -464,6 +481,46 @@ func (co *coordinator) noteBlock(prevhash string) {
 	}
 	co.mu.Unlock()
 	co.rotate("new block " + shortHash(prevhash))
+}
+
+// noteGatewayTip records a chain height read from a gateway's status page,
+// keyed by the hidden prevhash of the block it belongs to.
+//
+// Nothing in the work itself says how tall the chain is. A BLAKE2b job's
+// coinbase is a bare 32-byte commitment with no BIP34 height in it, and the
+// prevhash is a hash of a hash -- so the height can only come from the
+// gateway's page, which is read on its own schedule and can be a block behind
+// (or, briefly, a block ahead of) the jobs. Pairing each height with the tip
+// it was read for, and accepting it only for the tip switchyard is actually
+// on, means the dashboard can show "height unknown" for a moment but never a
+// height that belongs to a different block.
+func (co *coordinator) noteGatewayTip(hidden string, height uint64) {
+	if hidden == "" {
+		return
+	}
+	co.mu.Lock()
+	if hidden == co.lastPrevhash {
+		co.tipHeight, co.tipHeightOf = height, hidden
+	}
+	co.mu.Unlock()
+}
+
+// tipHeightFor is the recorded height if it belongs to prevhash, else 0. For
+// the current tip that is the chain tip's height -- what a node's
+// getblockcount says -- and zero until a gateway's page has confirmed it for
+// that exact tip. Caller holds co.mu.
+func (co *coordinator) tipHeightFor(prevhash string) uint64 {
+	if prevhash == "" || co.tipHeightOf != prevhash {
+		return 0
+	}
+	return co.tipHeight
+}
+
+// tipHeightKnown reports whether the current tip's height has been read.
+func (co *coordinator) tipHeightKnown() bool {
+	co.mu.Lock()
+	defer co.mu.Unlock()
+	return co.lastPrevhash != "" && co.tipHeightOf == co.lastPrevhash
 }
 
 // watchDwellCeiling forces a rotation when the chain has been quiet too long.
@@ -884,6 +941,7 @@ type statusDoc struct {
 	Step                 int       `json:"step"`
 	Rotations            int       `json:"rotations"`
 	LastPrevhash         string    `json:"lastPrevhash"`
+	TipHeight            uint64    `json:"tipHeight,omitempty"` // height of LastPrevhash's block; see tipHeightFor
 	LastRotate           time.Time `json:"lastRotate"`
 	MinDwellSeconds      int       `json:"minDwellSeconds"`
 	MaxDwellSeconds      int       `json:"maxDwellSeconds"`
@@ -999,6 +1057,7 @@ func (co *coordinator) status() statusDoc {
 		Step:                  co.step,
 		Rotations:             co.rotations,
 		LastPrevhash:          co.lastPrevhash,
+		TipHeight:             co.tipHeightFor(co.lastPrevhash),
 		LastRotate:            co.lastRotate,
 		MinDwellSeconds:       co.cfg.MinDwellSeconds,
 		MaxDwellSeconds:       co.cfg.MaxDwellSeconds,

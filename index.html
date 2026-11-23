@@ -987,7 +987,7 @@ p.foot { font-size: 0.7rem; color: var(--sentinel); margin: 0.5rem 0 0; }
     <div class="stat"><div class="k">Rotation cost<button class="help" type="button" data-help="statCost" aria-label="What is this?">?</button></div><div class="v" id="sCost">&mdash;</div><div class="sub" id="sCostSub">&mdash;</div></div>
     <div class="stat"><div class="k">Since last rotation<button class="help" type="button" data-help="statOnPool" aria-label="What is this?">?</button></div><div class="v" id="sDwell">&mdash;</div><div class="sub" id="sNext">&mdash;</div></div>
     <div class="stat"><div class="k">Dwell<button class="help" type="button" data-help="statDwell" aria-label="What is this?">?</button></div><div class="v sm" id="sDwellRange">&mdash;</div><div class="sub">floor &middot; ceiling</div></div>
-    <div class="stat"><div class="k">Chain tip<button class="help" type="button" data-help="statTip" aria-label="What is this?">?</button></div><div class="v sm" id="sTip">&mdash;</div></div>
+    <div class="stat"><div class="k">Chain tip<button class="help" type="button" data-help="statTip" aria-label="What is this?">?</button></div><div class="v sm" id="sTip">&mdash;</div><div class="sub" id="sTipSub">&nbsp;</div></div>
     <div class="stat"><div class="k">Uptime<button class="help" type="button" data-help="statUptime" aria-label="What is this?">?</button></div><div class="v" id="sUp">&mdash;</div><div class="sub" id="sPoll">&mdash;</div></div>
   </section>
 
@@ -3265,9 +3265,21 @@ function render(d) {
   // zeros -- that is what proof of work means -- so the leading characters
   // carry no information, and they were spending the card's whole width to
   // say nothing while the ellipsis ate the part that identifies the block.
-  $("sTip").textContent = d.lastPrevhash
-    ? "…" + d.lastPrevhash.slice(-12)
-    : "waiting for a job";
+  //
+  // The HEIGHT leads once a gateway's page has confirmed it for this exact
+  // tip (tipHeight is omitted until then), and the hash tail moves under it:
+  // the number says where the chain is, the tail still shows it changed.
+  var tail = d.lastPrevhash ? "…" + d.lastPrevhash.slice(-12) : "";
+  var tipEl = $("sTip");
+  if (d.lastPrevhash && d.tipHeight) {
+    setClass(tipEl, "v");
+    tipEl.textContent = num(d.tipHeight);
+    $("sTipSub").textContent = tail;
+  } else {
+    setClass(tipEl, "v sm");
+    tipEl.textContent = d.lastPrevhash ? tail : "waiting for a job";
+    $("sTipSub").textContent = d.lastPrevhash ? "reading height…" : " ";
+  }
   var up = agoFull(d.startedAt, d.now);
   $("sUp").textContent = up.pretty;
   $("sPoll").textContent = num(up.total) + "s · refresh every "
@@ -4679,9 +4691,15 @@ var HELP_TEXT = {
     + "rotates when this value changes, so a tip that moves is the block "
     + "signal working — and a tip that has sat still for far longer than "
     + "a block interval is the one thing that would stop rotation entirely.</p>"
-    + "<p>Shown tail first: every block hash begins with the same run of "
-    + "zeros, so the end is the part that identifies it. Compare it against a "
-    + "block explorer to confirm your node is on the main chain.</p>",
+    + "<p>The big number is the tip’s <b>block height</b> — what your node’s "
+    + "<code>getblockcount</code> says. The jobs carry no height, so it is read "
+    + "from your gateways’ status pages and shown only once one of them "
+    + "confirms it for this exact tip; until then the card says it is "
+    + "reading it.</p>"
+    + "<p>Underneath, the tip itself, tail only. It is <b>not</b> the block "
+    + "hash an explorer shows: DATUM’s BLAKE2b jobs carry a tagged SHA-256 of "
+    + "that hash with its first six bytes zeroed, and that is the value "
+    + "switchyard watches. Use the height to compare against an explorer.</p>",
 
   statUptime:
     "<p>How long this process has been running. Every figure on this page is "

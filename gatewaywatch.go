@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"log"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -52,6 +55,13 @@ type gatewayHealth struct {
 	// work is going to that pool, so the dashboard's "solo" would be wrong.
 	// Warn-only: nothing is refused for it.
 	SoloMismatch bool `json:"soloMismatch,omitempty"`
+	// BlockHeight is the height of the block the gateway's current job is
+	// BUILDING -- the template height, one above the chain tip -- and
+	// PrevBlock is that job's previous block hash in the familiar display
+	// order. Together they are where the dashboard's chain-tip height comes
+	// from; see noteGatewayTip for why they are read as a pair.
+	BlockHeight uint64 `json:"blockHeight,omitempty"`
+	PrevBlock   string `json:"prevBlock,omitempty"`
 }
 
 // The one status DATUM prints when it is actually talking to its Prime.
@@ -154,6 +164,9 @@ func (co *coordinator) watchGateways(ctx context.Context) {
 			info.applyRole(pool.Solo)
 			was, _ := co.gw.get(pool.displayName())
 			co.gw.set(pool.displayName(), *info)
+			if info.BlockHeight > 0 {
+				co.noteGatewayTip(hiddenPrevhash(info.PrevBlock), info.BlockHeight-1)
+			}
 			// Log the transition, not the state: an operator who has this
 			// dashboard closed should still find it in the journal.
 			if info.Unpooled && !was.Unpooled {
@@ -174,6 +187,12 @@ func (co *coordinator) watchGateways(ctx context.Context) {
 		}
 	}
 
+	// A new block also asks for a read, so the tip's height appears within a
+	// second of the tip itself rather than up to a whole poll interval later.
+	// The gateway's page can trail the job it just pushed by a moment, so a
+	// read that still finds no height for the new tip is retried once,
+	// shortly after; anything slower than that is left to the regular tick.
+	var retry <-chan time.Time
 	poll()
 	t := time.NewTicker(every)
 	defer t.Stop()
@@ -183,6 +202,15 @@ func (co *coordinator) watchGateways(ctx context.Context) {
 			return
 		case <-t.C:
 			poll()
+		case <-co.gwKick:
+			poll()
+			retry = nil
+			if !co.tipHeightKnown() {
+				retry = time.After(3 * time.Second)
+			}
+		case <-retry:
+			retry = nil
+			poll()
 		}
 	}
 }
@@ -191,7 +219,38 @@ var (
 	poolAccRE = regexp.MustCompile(`Pool Shares Accepted:\s*(\d+)`)
 	poolRejRE = regexp.MustCompile(`Pool Shares Rejected:\s*(\d+)`)
 	netDiffRE = regexp.MustCompile(`Block Difficulty:\s*([0-9]+(?:\.[0-9]+)?)`)
+	heightRE  = regexp.MustCompile(`Block Height:\s*(\d+)`)
+	// DATUM wraps the hash's leading zeros in their own element to dim them,
+	// so once tags are stripped the hash arrives split by whitespace
+	// ("0000000000000000 5ed8e0..."). Sixty-four hex digits with any
+	// whitespace between them, rejoined below.
+	prevBlockRE = regexp.MustCompile(`Previous Block:\s*((?:[0-9a-fA-F]\s*){64})`)
+	spacesRE    = regexp.MustCompile(`\s+`)
 )
+
+// hiddenPrevhash turns a display-order block hash into the prevhash string
+// DATUM puts in every BLAKE2b job (datum_blake2b_prevblock_hidden in
+// datum_pow.c): the tagged SHA-256 of the hash's display-order bytes under
+// "Bitcoin prevblock header, hashed", with its first six bytes zeroed.
+//
+// That is the value switchyard's rotation clock -- and the dashboard's chain
+// tip -- is keyed on, and it is deliberately not the block hash a node or an
+// explorer shows. This is how a height read from a gateway's page, which
+// prints the ordinary hash, is matched to it. "" for anything malformed.
+func hiddenPrevhash(display string) string {
+	raw, err := hex.DecodeString(display)
+	if err != nil || len(raw) != 32 {
+		return ""
+	}
+	tag := sha256.Sum256([]byte("Bitcoin prevblock header, hashed"))
+	h := sha256.New()
+	h.Write(tag[:])
+	h.Write(tag[:])
+	h.Write(raw)
+	out := h.Sum(nil)
+	clear(out[:6])
+	return hex.EncodeToString(out)
+}
 
 // inspectGatewayFull is inspectGateway plus the share counters. Split so the
 // editor's one-shot "Inspect" button and this poller cannot drift apart.
@@ -207,7 +266,11 @@ func inspectGatewayFull(ctx context.Context, rawURL string) (*gatewayHealth, err
 		PoolAccepted:      firstUint(poolAccRE, text),
 		PoolRejected:      firstUint(poolRejRE, text),
 		NetworkDifficulty: firstFloat(netDiffRE, text),
+		BlockHeight:       firstUint(heightRE, text),
 		Checked:           time.Now(),
+	}
+	if prev := spacesRE.ReplaceAllString(firstGroup(prevBlockRE, text), ""); len(prev) == 64 {
+		h.PrevBlock = strings.ToLower(prev)
 	}
 	h.Unpooled = h.unpooled()
 	return h, nil

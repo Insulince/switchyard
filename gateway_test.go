@@ -537,3 +537,70 @@ func (s *syncBuffer) String() string {
 	defer s.mu.Unlock()
 	return s.b.String()
 }
+
+// A live pair, captured 2026-11-23 from a mainnet gateway: the page's
+// "Previous Block" (display order) and the prevhash switchyard's rotation
+// clock held at that moment, which came from the same gateway's SV2 job.
+const (
+	liveDisplayPrev = "00000000000000005866e7b2095db7eb8a1d8b4502e2c212b8c593f9346a9449"
+	liveHiddenPrev  = "0000000000007d77ce6655610f4da212085b7408c3cf9716be72a6441adb4aa3"
+)
+
+// The page and the jobs name the same block in two different ways; the height
+// is only usable if one can be turned into the other exactly.
+func TestHiddenPrevhashMatchesDatum(t *testing.T) {
+	if got := hiddenPrevhash(liveDisplayPrev); got != liveHiddenPrev {
+		t.Fatalf("hiddenPrevhash = %s, want %s", got, liveHiddenPrev)
+	}
+	for _, bad := range []string{"", "zz", liveDisplayPrev[:62]} {
+		if got := hiddenPrevhash(bad); got != "" {
+			t.Errorf("hiddenPrevhash(%q) = %q, want empty", bad, got)
+		}
+	}
+}
+
+// The job section as DATUM really prints it: the hash's leading zeros sit in
+// their own span, so the flattened text splits the hash in two.
+const heightGatewayPage = `<html><head><title>DATUM Gateway Status</title></head><body>
+  <tr><td>Status:</td><td>Connected and Ready</td></tr>
+  <tr><td>Pool Host:</td><td>pool.example:23334</td></tr>
+  <tr><td class="label">Block Height:</td><td>983250</td></tr>
+  <tr><td class="label">Previous Block:</td>
+      <td class="fixed-width"><span class='leading_zeros'>0000000000000000</span>5866e7b2095db7eb8a1d8b4502e2c212b8c593f9346a9449</td></tr>
+  <tr><td class="label">Block Target:</td><td class="fixed-width">00000000ffff</td></tr>
+</body></html>`
+
+func TestGatewayPageYieldsTipHeight(t *testing.T) {
+	h := inspectPage(t, heightGatewayPage)
+	if h.BlockHeight != 983250 || h.PrevBlock != liveDisplayPrev {
+		t.Fatalf("parsed height=%d prev=%q", h.BlockHeight, h.PrevBlock)
+	}
+
+	co := newCoordinator(mixedProtoConfig(t))
+	// A height for a tip switchyard is not on is never shown -- not before
+	// any tip, and not for a different one.
+	co.noteGatewayTip(hiddenPrevhash(h.PrevBlock), h.BlockHeight-1)
+	if s := co.status(); s.TipHeight != 0 {
+		t.Fatalf("height shown with no tip: %d", s.TipHeight)
+	}
+	co.noteBlock(liveHiddenPrev)
+	if co.tipHeightKnown() || co.status().TipHeight != 0 {
+		t.Fatal("a height read before the tip arrived was kept")
+	}
+	co.noteGatewayTip(hiddenPrevhash(h.PrevBlock), h.BlockHeight-1)
+	if s := co.status(); s.TipHeight != 983249 || !co.tipHeightKnown() {
+		t.Fatalf("tip height = %d, want 983249 (the template is one above the tip)", s.TipHeight)
+	}
+	// The next block: the old height must not be shown against the new tip.
+	next := "0000000000001111" + liveHiddenPrev[16:]
+	co.noteBlock(next)
+	if s := co.status(); s.TipHeight != 0 || co.tipHeightKnown() {
+		t.Fatalf("stale height %d shown against a new tip", s.TipHeight)
+	}
+	// And noteBlock asked the poller for a fresh read.
+	select {
+	case <-co.gwKick:
+	default:
+		t.Fatal("a new block did not request a gateway read")
+	}
+}
