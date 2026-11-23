@@ -160,6 +160,70 @@ func TestSv2LinkBecomesBindableOnWork(t *testing.T) {
 	}
 }
 
+// SV2 work drives the rotation clock exactly as an SV1 mining.notify does. Before
+// this, an all-SV2 mesh never reported a prevhash: the chain tip stayed empty,
+// the dwell ceiling never armed, and the schedule froze at step 0 forever.
+func TestSv2LinkWorkDrivesRotationClock(t *testing.T) {
+	co := newCoordinator(mixedProtoConfig(t))
+	l := co.ups[0][1].(*sv2Link)
+
+	// Work before any SetNewPrevHash carries a zero prevhash: not a block.
+	early := readyWork()
+	early.PrevHash = [32]byte{}
+	l.ingest(early)
+	if s := co.status(); s.LastPrevhash != "" || !s.LastRotate.IsZero() {
+		t.Fatalf("a zero prevhash seeded the clock: tip=%q lastRotate=%v", s.LastPrevhash, s.LastRotate)
+	}
+
+	// The first real prevhash: tracked (and the ceiling armed), but not a rotation.
+	w := readyWork()
+	l.ingest(w)
+	s := co.status()
+	if want := hex.EncodeToString(w.PrevHash[:]); s.LastPrevhash != want {
+		t.Fatalf("chain tip = %q, want %q", s.LastPrevhash, want)
+	}
+	if s.LastRotate.IsZero() {
+		t.Fatal("first prevhash did not arm the dwell ceiling")
+	}
+	if s.Rotations != 0 {
+		t.Fatalf("the first prevhash must not rotate, got %d", s.Rotations)
+	}
+
+	// The tip string is the same one the SV1 rigs see in mining.notify params[1],
+	// so SV1 and SV2 gateways in one mesh agree on what "the same block" is.
+	var params []json.RawMessage
+	var msg struct {
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(l.lastNotify, &msg); err != nil || json.Unmarshal(msg.Params, &params) != nil {
+		t.Fatalf("rendered notify did not parse: %s", l.lastNotify)
+	}
+	var notifyPrev string
+	_ = json.Unmarshal(params[1], &notifyPrev)
+	if notifyPrev != s.LastPrevhash {
+		t.Fatalf("tip %q differs from the notify prevhash %q an SV1 path would report", s.LastPrevhash, notifyPrev)
+	}
+
+	// A new job on the same block is not a block.
+	same := readyWork()
+	same.JobID++
+	l.ingest(same)
+	if got := co.status().Rotations; got != 0 {
+		t.Fatalf("a new job on the same prevhash rotated (%d)", got)
+	}
+
+	// A new prevhash past the dwell floor rotates once.
+	co.mu.Lock()
+	co.lastRotate = time.Now().Add(-time.Hour)
+	co.mu.Unlock()
+	next := readyWork()
+	next.PrevHash[0] ^= 0xff
+	l.ingest(next)
+	if got := co.status().Rotations; got != 1 {
+		t.Fatalf("a new SV2 prevhash should rotate once, got %d", got)
+	}
+}
+
 // The notify the link renders from SV2 work is a real mining.notify whose job_id
 // is the SV2 job id in hex -- the bridge the share path parses back on submit.
 func TestSv2LinkRendersNotifyWithJobID(t *testing.T) {

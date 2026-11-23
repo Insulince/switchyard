@@ -193,6 +193,26 @@ func (l *sv2Link) session(ctx context.Context, user string) (healthy bool, err e
 // renders it to an SV1 notify (and a set_difficulty when the difficulty moved),
 // and pushes both to the bound session. The first ready update opens the channel.
 func (l *sv2Link) ingest(w sv2Work) {
+	// The rotation clock. An SV1 upstream feeds the coordinator every
+	// mining.notify's prevhash (upstream.handleNotification); an SV2 link must do
+	// the same, or a mesh whose gateways are all SV2 never learns the chain tip:
+	// no block ever rotates it, and the dwell ceiling -- armed by the first
+	// prevhash seen -- never arms either, so the schedule freezes at step 0
+	// forever ("since last rotation: never", "chain tip: waiting for a job").
+	//
+	// The string MUST be the one an SV1 gateway would send for the same block, or
+	// a mixed SV1/SV2 mesh would see every block as two different prevhashes and
+	// rotate on the alternation. It is: it is exactly params[1] of the
+	// mining.notify this link renders for its SV1 rigs (jobToSV1NotifyParams),
+	// which those rigs mine valid shares from. An all-zero prevhash is "no
+	// SetNewPrevHash yet", not a block, and must not seed the clock.
+	//
+	// Called before taking l.mu, like the SV1 path: a rotation closes rig
+	// sessions, which call back into their links.
+	if l.co != nil && w.PrevHash != ([32]byte{}) {
+		l.co.noteBlock(hex.EncodeToString(w.PrevHash[:]))
+	}
+
 	job := sv2WorkToJob(w)
 	notifyParams, err := jobToSV1NotifyParams(sv2JobIDString(w.JobID), job)
 	if err != nil {
