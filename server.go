@@ -64,9 +64,15 @@ type server struct {
 	// into config.json, so a generated secret never reaches the browser. Unsaved
 	// ones are discarded on restart -- no harm, nothing references them. On s
 	// (not the coordinator) because, like feed, it must outlive a reload.
-	stagedMu sync.Mutex
-	staged   map[string]string
+	stagedMu    sync.Mutex
+	staged      map[string]string
+	stagedOrder []string // handles oldest first, for the cap in stageSecret
 }
+
+// maxStaged bounds the unsaved secrets held at once. An editor session stages
+// one per Generate click; far more than this unsaved at a time is something
+// other than a person editing, and must not grow memory without limit.
+const maxStaged = 32
 
 func newServer(path string) *server {
 	return &server{path: path, reloadC: make(chan struct{}, 1), feed: newShareFeed(), staged: map[string]string{}}
@@ -79,6 +85,24 @@ func (s *server) stageSecret(secret string) string {
 	h := randomHex(16)
 	s.stagedMu.Lock()
 	s.staged[h] = secret
+	s.stagedOrder = append(s.stagedOrder, h)
+	// Over the cap, drop the oldest still-unsaved handles. Order entries whose
+	// handle was already consumed are skipped as they surface.
+	for len(s.staged) > maxStaged && len(s.stagedOrder) > 0 {
+		old := s.stagedOrder[0]
+		s.stagedOrder = s.stagedOrder[1:]
+		delete(s.staged, old)
+	}
+	// Consumed handles leave stale order entries; compact once they dominate.
+	if len(s.stagedOrder) > 2*maxStaged {
+		live := s.stagedOrder[:0]
+		for _, k := range s.stagedOrder {
+			if _, ok := s.staged[k]; ok {
+				live = append(live, k)
+			}
+		}
+		s.stagedOrder = live
+	}
 	s.stagedMu.Unlock()
 	return h
 }
@@ -268,7 +292,51 @@ func mustPostJSON(w http.ResponseWriter, r *http.Request) bool {
 	return mustPost(w, r) && requireJSONBody(w, r)
 }
 
+// hostAllowed is the DNS-rebinding guard: it accepts a Host header only when
+// it names an IP literal or localhost.
+//
+// requireJSONBody stops OTHER origins, and DNS rebinding is how a hostile
+// page stops being another origin: it serves itself from a name it controls,
+// then re-points that name at this machine's address. The browser still calls
+// the origin attacker.example, so its fetches are same-origin, the JSON
+// guard's preflight never happens, and every endpoint -- POST /config
+// included -- is in reach. What the rebound request cannot change is its Host
+// header: it still says attacker.example. Nobody legitimately reaches this
+// dashboard by an arbitrary DNS name -- it is opened as localhost:<port>, or
+// by a LAN IP from another machine -- so refusing every name except localhost
+// closes the attack without a token, a login or a setting.
+func hostAllowed(host string) bool {
+	h := host
+	if hh, _, err := net.SplitHostPort(host); err == nil {
+		h = hh
+	}
+	h = strings.TrimSuffix(strings.Trim(h, "[]"), ".")
+	if h == "" {
+		return false
+	}
+	lh := strings.ToLower(h)
+	if lh == "localhost" || strings.HasSuffix(lh, ".localhost") {
+		return true
+	}
+	return net.ParseIP(h) != nil
+}
+
+func guardHost(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !hostAllowed(r.Host) {
+			http.Error(w, "switchyard answers only to localhost or an IP address, not "+
+				strconv.Quote(r.Host), http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *server) routes() http.Handler {
+	return guardHost(s.mux())
+}
+
+func (s *server) mux() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -404,7 +472,9 @@ func (s *server) routes() http.Handler {
 	// rides in the rig's authoritySecret as "__staged__:<handle>" until a save
 	// resolves it (saveAndReload) or the process restarts and discards it.
 	mux.HandleFunc("/authority/generate", func(w http.ResponseWriter, r *http.Request) {
-		if !mustPost(w, r) {
+		// JSON-guarded like its siblings even though it reads no body: a bare
+		// mustPost let any page's cross-site form mint and stage secrets.
+		if !mustPostJSON(w, r) {
 			return
 		}
 		secret, err := newAuthoritySecret()

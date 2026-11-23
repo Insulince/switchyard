@@ -20,6 +20,7 @@ func TestJSONEndpointsRejectNonJSONPost(t *testing.T) {
 
 	do := func(method, ctype, body string) int {
 		req := httptest.NewRequest(method, "/gateway/inspect", strings.NewReader(body))
+		req.Host = "localhost:7160" // past the DNS-rebinding guard; see TestHostGuard
 		if ctype != "" {
 			req.Header.Set("Content-Type", ctype)
 		}
@@ -51,5 +52,74 @@ func TestRequireJSONBodyAcceptsCharsetParam(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	if !requireJSONBody(httptest.NewRecorder(), req) {
 		t.Fatal("application/json; charset=utf-8 was rejected, but it is valid JSON")
+	}
+}
+
+// DNS rebinding makes a hostile page same-origin, which walks straight past
+// the JSON guard above -- but its requests still carry the hostile name in
+// Host. Only localhost and IP literals reach the router. Pinned against the
+// real router so the guard cannot come unwired.
+func TestHostGuard(t *testing.T) {
+	h := newServer(filepath.Join(t.TempDir(), "config.json")).routes()
+	get := func(host string) int {
+		req := httptest.NewRequest(http.MethodGet, "/status", nil)
+		req.Host = host
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	for _, ok := range []string{"localhost:7160", "LOCALHOST", "app.localhost:7160",
+		"127.0.0.1:7160", "192.168.1.165:7160", "[::1]:7160", "::1"} {
+		if got := get(ok); got == http.StatusForbidden {
+			t.Errorf("Host %q refused, want allowed", ok)
+		}
+	}
+	for _, bad := range []string{"attacker.example", "attacker.example:7160",
+		"localhost.attacker.example", "127.0.0.1.nip.io:7160", ""} {
+		if got := get(bad); got != http.StatusForbidden {
+			t.Errorf("Host %q: status %d, want 403", bad, got)
+		}
+	}
+}
+
+// Generate is JSON-guarded like its siblings, so a cross-site form cannot mint
+// secrets, and what it stages is bounded however often it is called.
+func TestAuthorityGenerateGuardedAndBounded(t *testing.T) {
+	s := newServer(filepath.Join(t.TempDir(), "config.json"))
+	h := s.routes()
+	post := func(ctype string) int {
+		req := httptest.NewRequest(http.MethodPost, "/authority/generate", strings.NewReader("{}"))
+		req.Host = "localhost:7160"
+		if ctype != "" {
+			req.Header.Set("Content-Type", ctype)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if got := post("text/plain"); got != http.StatusUnsupportedMediaType {
+		t.Fatalf("text/plain generate: status %d, want 415", got)
+	}
+	if got := post("application/json"); got != http.StatusOK {
+		t.Fatalf("JSON generate: status %d, want 200", got)
+	}
+
+	first := s.stageSecret("first")
+	for i := 0; i < 3*maxStaged; i++ {
+		s.stageSecret("x")
+	}
+	s.stagedMu.Lock()
+	n, order := len(s.staged), len(s.stagedOrder)
+	s.stagedMu.Unlock()
+	if n > maxStaged || order > 2*maxStaged+1 {
+		t.Fatalf("staged=%d order=%d, want <= %d / %d", n, order, maxStaged, 2*maxStaged+1)
+	}
+	if _, ok := s.consumeStaged(first); ok {
+		t.Fatal("the oldest handle survived past the cap")
+	}
+	// The newest is still there to be saved.
+	h2 := s.stageSecret("newest")
+	if sec, ok := s.consumeStaged(h2); !ok || sec != "newest" {
+		t.Fatalf("newest handle lost: %q %v", sec, ok)
 	}
 }

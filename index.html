@@ -3773,7 +3773,9 @@ function maskedSecretField(value, onInput) {
 function generateRigIdentity(port) {
   if (genInFlight[port]) return;
   genInFlight[port] = true;
-  fetch("/authority/generate", { method: "POST" })
+  fetch("/authority/generate", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}"
+  })
     .then(function (r) { return r.json().then(function (o) { return { ok: r.ok, o: o }; }); })
     .then(function (res) {
       if (res.ok) {

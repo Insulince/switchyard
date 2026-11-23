@@ -177,7 +177,7 @@ func TestShareStreamOutlivesReadTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	_, _ = io.WriteString(conn, "GET /shares/stream HTTP/1.1\r\nHost: x\r\n\r\n")
+	_, _ = io.WriteString(conn, "GET /shares/stream HTTP/1.1\r\nHost: localhost\r\n\r\n")
 	rd := bufio.NewReader(conn)
 	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 	waitFor := func(want string) {
