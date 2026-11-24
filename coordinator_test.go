@@ -3,32 +3,29 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"net"
+	"math"
 	"testing"
 	"time"
 )
 
-// randomBalancedStart has two jobs and it is easy to get one without the
-// other: the arrangement must be BALANCED (no pool carrying two rigs while
-// another carries none) and it must be RANDOM (no pool systematically
-// favoured, which is the whole reason it exists -- a fixed opening order
-// biases whichever pools sit late in the cycle every time the process
-// restarts).
-func TestRandomBalancedStartIsBalanced(t *testing.T) {
+// The opening placement has the same two jobs the old randomised start had, now
+// produced by the balance scheduler itself from an all-zero deficit: it must be
+// BALANCED (no pool carrying two rigs while another carries none, so with rigs
+// <= pools no two rigs share one) and RANDOM (no pool systematically favoured,
+// which a fixed opening order would be -- biasing whichever pools the scheduler
+// tries first, on every restart).
+func TestOpeningPlacementIsBalanced(t *testing.T) {
 	cases := []struct{ rigs, pools int }{
 		{1, 3}, {2, 3}, {3, 3}, {4, 3}, {5, 3}, {7, 3},
 		{2, 2}, {1, 1}, {6, 2}, {3, 7},
 	}
 	for _, c := range cases {
-		for trial := 0; trial < 500; trial++ {
-			base := randomBalancedStart(c.rigs, c.pools)
-			if len(base) != c.rigs {
-				t.Fatalf("rigs=%d pools=%d: got %d offsets", c.rigs, c.pools, len(base))
-			}
+		for trial := 0; trial < 300; trial++ {
+			co := newCoordinator(scheduleConfig(c.rigs, c.pools))
 			load := make([]int, c.pools)
-			for _, p := range base {
+			for _, p := range co.cur {
 				if p < 0 || p >= c.pools {
-					t.Fatalf("rigs=%d pools=%d: offset %d out of range", c.rigs, c.pools, p)
+					t.Fatalf("rigs=%d pools=%d: placed on %d, out of range", c.rigs, c.pools, p)
 				}
 				load[p]++
 			}
@@ -41,30 +38,29 @@ func TestRandomBalancedStartIsBalanced(t *testing.T) {
 					hi = n
 				}
 			}
-			// Perfectly spread means no pool holds two more rigs than any
-			// other. With rigs <= pools this also proves no two rigs share a
-			// pool, which is what keeps their cycle offsets distinct.
+			// Spread of at most one. With rigs <= pools this is also the proof
+			// that no two rigs opened on the same pool.
 			if hi-lo > 1 {
-				t.Fatalf("rigs=%d pools=%d: unbalanced load %v", c.rigs, c.pools, load)
+				t.Fatalf("rigs=%d pools=%d: unbalanced opening %v", c.rigs, c.pools, load)
 			}
 		}
 	}
 }
 
-func TestRandomBalancedStartIsRandom(t *testing.T) {
+func TestOpeningPlacementIsRandom(t *testing.T) {
 	const (
 		pools  = 3
 		rigs   = 2
 		trials = 6000
 	)
-	// Count how often each pool is left empty. With 2 rigs across 3 pools
-	// exactly one pool is dark at t=0, and over many restarts each pool should
-	// draw that short straw about a third of the time. A fixed opening
-	// arrangement would pin it to one pool every single run.
+	// With 2 rigs across 3 pools exactly one pool is dark at startup, and over
+	// many fresh coordinators each pool should draw that short straw about a
+	// third of the time. A fixed opening order would pin it to one pool every
+	// single run.
 	darkCount := make([]int, pools)
 	for i := 0; i < trials; i++ {
 		load := make([]int, pools)
-		for _, p := range randomBalancedStart(rigs, pools) {
+		for _, p := range newCoordinator(scheduleConfig(rigs, pools)).cur {
 			load[p]++
 		}
 		for p, n := range load {
@@ -200,78 +196,261 @@ func TestRotationCostCountsOnlyRotationGaps(t *testing.T) {
 	}
 }
 
-// THE CENTRAL CLAIM OF THE WHOLE PROGRAM, and it was not covered.
+// THE CENTRAL CLAIM OF THE WHOLE PROGRAM is now adherence, not arithmetic.
 //
-// The README states two properties of (base[i] + t) mod P as facts: two rigs
-// can never collide, and every rig visits every pool exactly once per cycle.
-// Everything switchyard promises about fairness rests on both. They are one
-// line of arithmetic, which is exactly the kind of code that gets refactored
-// by somebody who has not read the paragraph explaining why it is shaped that
-// way.
-func TestTwoRigsNeverShareAPool(t *testing.T) {
-	for pools := 2; pools <= 7; pools++ {
-		for rigs := 2; rigs <= pools; rigs++ {
-			co := newCoordinator(scheduleConfig(rigs, pools))
-			for step := 0; step < pools*3; step++ {
-				co.step = step
-				seen := map[int]int{}
-				for r := 0; r < rigs; r++ {
-					p := co.activePoolIdx(r)
-					if prev, dup := seen[p]; dup {
-						t.Fatalf("%d rigs / %d pools, step %d: rigs %d and %d both on pool %d",
-							rigs, pools, step, prev, r, p)
-					}
-					seen[p] = r
-				}
-			}
+// The old (base[i]+step)%P scheme guaranteed per-cycle evenness by
+// construction. The balance scheduler replaces it with a feedback rule, so the
+// claim it has to earn is statistical: whatever the targets, and however
+// variable the block timing, each pool's share of delivered time converges to
+// the share it was asked for. These two tests are that claim -- for an even
+// split and for an uneven one.
+
+// simulateRotations drives the balance scheduler through n rotations, crediting
+// each with a DELIBERATELY variable dwell so block-timing variance is part of
+// the test rather than assumed away, and reports each pool's final share of
+// delivered time. It exercises the real placement logic (assignLocked), not a
+// model of it.
+func simulateRotations(co *coordinator, n int) []float64 {
+	co.mu.Lock()
+	defer co.mu.Unlock()
+	for r := 0; r < n; r++ {
+		// A dwell that swings an order of magnitude, lump by lump: the kind of
+		// uneven slot length a real chain produces, and exactly what a by-count
+		// scheme could not absorb.
+		dwell := float64(1 + r%20)
+		for i := range co.cur {
+			co.delivered[i][co.cur[i]] += dwell
+		}
+		co.rotations++
+		co.assignLocked()
+	}
+	total := 0.0
+	shares := make([]float64, len(co.cfg.Pools))
+	for _, rig := range co.delivered {
+		for j, d := range rig {
+			shares[j] += d
+			total += d
+		}
+	}
+	for j := range shares {
+		shares[j] /= total
+	}
+	return shares
+}
+
+// The reason the tallies are per rig. With one rig doing nearly all the hashing, a
+// pool's share of HASHRATE only reaches its target if that rig's own time does; a
+// single tally per pool could read on target with almost no hashrate behind it. So
+// this weighs each rig by its hashrate, which rig-time shares alone cannot catch.
+func TestHashrateFollowsTargetsWithADominantRig(t *testing.T) {
+	shares := []float64{47.06, 29.41, 23.53}
+	hash := []float64{16.8, .5, .5, .75, .75, .75}
+	co := newCoordinator(zeroShareConfig(t, shares, len(hash)))
+	co.mu.Lock()
+	defer co.mu.Unlock()
+
+	work := make([]float64, len(shares))
+	total := 0.0
+	for r := 0; r < 1008; r++ { // a week of blocks
+		dwell := float64(1 + r%20)
+		for i, p := range co.cur {
+			co.delivered[i][p] += dwell
+			work[p] += hash[i] * dwell
+			total += hash[i] * dwell
+		}
+		co.rotations++
+		co.assignLocked()
+	}
+	for j, s := range shares {
+		if got := work[j] / total * 100; math.Abs(got-s) > 1 {
+			t.Errorf("pool %d: %.2f%% of hashrate, want within 1 point of %.2f%%", j, got, s)
 		}
 	}
 }
 
-// Every rig tours every pool exactly once per cycle, at ANY ratio.
-//
-// rig i's positions over P steps are (base[i] + t) mod P for t in 0..P-1,
-// which is a complete residue system regardless of what the other rigs are
-// doing -- so this holds just as firmly when rigs outnumber pools and several
-// share a destination. It is what makes every pool's long-run share equal, and
-// what makes randomising the opening arrangement safe.
-func TestEveryRigToursEveryPoolOncePerCycle(t *testing.T) {
-	for pools := 2; pools <= 7; pools++ {
-		for rigs := 1; rigs <= pools*3; rigs++ {
-			co := newCoordinator(scheduleConfig(rigs, pools))
-			for r := 0; r < rigs; r++ {
-				visits := make([]int, pools)
-				for step := 0; step < pools; step++ {
-					co.step = step
-					visits[co.activePoolIdx(r)]++
-				}
-				for p, n := range visits {
-					if n != 1 {
-						t.Fatalf("%d rigs / %d pools: rig %d visited pool %d %d times in one cycle, want 1",
-							rigs, pools, r, p, n)
-					}
-				}
-			}
+// An even split must still come out even -- the common case has to be at least
+// as good as the scheme it replaced, over a realistic run.
+func TestBalanceConvergesToEvenSplit(t *testing.T) {
+	shares := simulateRotations(newCoordinator(scheduleConfig(3, 5)), 40000)
+	for j, got := range shares {
+		if math.Abs(got-0.2) > 0.01 {
+			t.Errorf("pool %d share %.4f, want ~0.20 (even): %v", j, got, shares)
 		}
 	}
 }
 
-// Exactly P-R pools are dark, which the README calls the arithmetic minimum.
-func TestDarkPoolCountIsTheArithmeticMinimum(t *testing.T) {
-	for pools := 2; pools <= 7; pools++ {
-		for rigs := 1; rigs <= pools; rigs++ {
-			co := newCoordinator(scheduleConfig(rigs, pools))
-			for step := 0; step < pools*2; step++ {
-				co.step = step
-				lit := map[int]bool{}
-				for r := 0; r < rigs; r++ {
-					lit[co.activePoolIdx(r)] = true
+// The reason the feature exists: an uneven split, including a tiny solo slot,
+// is delivered to within a hair of its target despite wildly variable dwells.
+// The weights mirror the simulator's own example so the test reads against a
+// case already seen to work.
+func TestBalanceConvergesToUnevenTargets(t *testing.T) {
+	cfg := config{
+		Pools: []poolConfig{
+			{Name: "a", Host: "h", Port: 1, StatusPort: 2, Share: sharep(64), Protocol: "sv1"},
+			{Name: "b", Host: "h", Port: 3, StatusPort: 4, Share: sharep(22), Protocol: "sv1"},
+			{Name: "c", Host: "h", Port: 5, StatusPort: 6, Share: sharep(4), Protocol: "sv1"},
+			{Name: "d", Host: "h", Port: 7, StatusPort: 8, Share: sharep(9), Protocol: "sv1"},
+			{Solo: true, Host: "gw", Port: 9, StatusPort: 10, Share: sharep(1), Protocol: "sv1"},
+		},
+		Rigs: []rigConfig{{Port: 23401, Protocol: "sv1"}, {Port: 23402, Protocol: "sv1"}, {Port: 23403, Protocol: "sv1"}},
+	}
+	cfg.applyDefaults()
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("fixture invalid: %v", err)
+	}
+	shares := simulateRotations(newCoordinator(cfg), 60000)
+	want := cfg.targets()
+	for j := range want {
+		if math.Abs(shares[j]-want[j]) > 0.01 {
+			t.Errorf("pool %d (target %.2f) delivered %.4f, want within 0.01: %v",
+				j, want[j], shares[j], shares)
+		}
+	}
+}
+
+// zeroShareConfig is a valid config with the given shares and rig count.
+func zeroShareConfig(t *testing.T, shares []float64, rigs int) config {
+	t.Helper()
+	var cfg config
+	for j, s := range shares {
+		cfg.Pools = append(cfg.Pools, poolConfig{
+			Name: fmt.Sprintf("p%d", j), Host: "h", Port: 100 + 2*j, StatusPort: 101 + 2*j, Share: sharep(s), Protocol: "sv1",
+		})
+	}
+	for i := 0; i < rigs; i++ {
+		cfg.Rigs = append(cfg.Rigs, rigConfig{Port: 23401 + i, Protocol: "sv1"})
+	}
+	cfg.applyDefaults()
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("fixture invalid: %v", err)
+	}
+	return cfg
+}
+
+// A pool set to 0% gets no rigs, ever. Not at startup, where every deficit is
+// zero and it would otherwise tie with the real pools, and not when rigs
+// outnumber the pools that want them, where the anti-clumping penalty would
+// otherwise push the spare rig onto it. The long-run share cannot catch either:
+// a few stray slots round to nothing over thousands of rotations, so this looks
+// at every placement rather than at the final numbers.
+func TestZeroSharePoolIsNeverScheduled(t *testing.T) {
+	cases := []struct {
+		shares []float64
+		rigs   int
+	}{
+		{[]float64{50, 50, 0}, 1},
+		{[]float64{50, 50, 0}, 2},
+		{[]float64{50, 50, 0}, 3},
+		{[]float64{50, 50, 0}, 6},
+		{[]float64{100, 0}, 1},
+		{[]float64{100, 0}, 2},
+		{[]float64{0, 60, 0, 40}, 5},
+	}
+	for _, c := range cases {
+		cfg := zeroShareConfig(t, c.shares, c.rigs)
+		for trial := 0; trial < 200; trial++ {
+			co := newCoordinator(cfg)
+			co.mu.Lock()
+			for r := 0; r < 50; r++ {
+				for i, p := range co.cur {
+					if c.shares[p] == 0 {
+						t.Fatalf("shares %v, %d rigs: rig %d placed on 0%% pool %d at rotation %d",
+							c.shares, c.rigs, i, p, r)
+					}
 				}
-				if dark := pools - len(lit); dark != pools-rigs {
-					t.Fatalf("%d rigs / %d pools, step %d: %d dark, want %d",
-						rigs, pools, step, dark, pools-rigs)
+				for i, p := range co.cur {
+					co.delivered[i][p] += float64(1 + r%20)
 				}
+				co.rotations++
+				co.assignLocked()
 			}
+			co.mu.Unlock()
+		}
+	}
+}
+
+// Excluding the 0% pool must not disturb the split among the others: the rigs
+// it would have taken double up, and the targets still converge.
+func TestZeroSharePoolLeavesOtherTargetsIntact(t *testing.T) {
+	shares := []float64{70, 30, 0}
+	cfg := zeroShareConfig(t, shares, 4)
+	got := simulateRotations(newCoordinator(cfg), 40000)
+	for j, s := range shares {
+		if math.Abs(got[j]-s/100) > 0.01 {
+			t.Errorf("pool %d delivered %.4f, want ~%.2f: %v", j, got[j], s/100, got)
+		}
+	}
+	if got[2] != 0 {
+		t.Errorf("0%% pool delivered %v, want exactly 0", got[2])
+	}
+}
+
+// The fallback is the other way a rig reaches a pool, and "any ready gateway"
+// must not include one the operator set to 0%. The 0% pool is deliberately
+// first: it is the first gateway the fallback loop reaches.
+func TestFallbackSkipsZeroSharePool(t *testing.T) {
+	cfg := zeroShareConfig(t, []float64{0, 50, 50}, 1)
+	cases := []struct {
+		name    string
+		ready   []bool
+		wantOK  bool
+		wantIdx int
+	}{
+		{"scheduled gateway up", []bool{true, true, true}, true, 1},
+		{"falls back to the other real pool", []bool{true, false, true}, true, 2},
+		{"only the 0% pool is up: no rig is better", []bool{true, false, false}, false, 0},
+	}
+	for _, c := range cases {
+		co := newCoordinator(cfg)
+		co.mu.Lock()
+		co.cur[0] = 1
+		co.mu.Unlock()
+		for j, ready := range c.ready {
+			u := co.ups[0][j].(*upstream)
+			u.mu.Lock()
+			u.ready = ready
+			u.mu.Unlock()
+		}
+		got, ok := co.upstreamForRig(0)
+		if ok != c.wantOK {
+			t.Errorf("%s: ok = %v, want %v", c.name, ok, c.wantOK)
+			continue
+		}
+		if ok && got != co.ups[0][c.wantIdx] {
+			t.Errorf("%s: bound to %s, want pool %d", c.name, got.displayName(), c.wantIdx)
+		}
+	}
+}
+
+// The real rotate path, which the convergence simulations go around by crediting
+// delivered themselves: the dwell that just ended lands on the pool each rig spent
+// it on and nowhere else, and the rig then leaves that pool because it is now the
+// one furthest ahead.
+func TestRotateCreditsTheDwellToEachRigsPool(t *testing.T) {
+	co := newCoordinator(zeroShareConfig(t, []float64{50, 30, 20}, 3))
+	const dwell = 600.0
+
+	co.mu.Lock()
+	before := append([]int(nil), co.cur...)
+	co.lastRotate = time.Now().Add(-dwell * time.Second)
+	co.mu.Unlock()
+
+	co.rotate("test")
+
+	co.mu.Lock()
+	defer co.mu.Unlock()
+	for i, on := range before {
+		for p, got := range co.delivered[i] {
+			want := 0.0
+			if p == on {
+				want = dwell
+			}
+			if math.Abs(got-want) > 5 {
+				t.Errorf("rig %d: delivered[%d] = %.1f, want about %.0f (it was on pool %d)", i, p, got, want, on)
+			}
+		}
+		if co.cur[i] == on {
+			t.Errorf("rig %d stayed on pool %d, the one it just overshot", i, on)
 		}
 	}
 }
@@ -317,118 +496,6 @@ func TestFastBlocksAreHeldOffByTheDwellFloor(t *testing.T) {
 	}
 }
 
-// zeroRng is a deterministic stand-in for the tie-breaker: it always picks the
-// first candidate, so spreadOffsets' arithmetic can be asserted exactly without
-// the randomness it uses in production for fairness.
-func zeroRng() func(int) int { return func(int) int { return 0 } }
-
-// THE BUG THIS FIXES COST A WHOLE RUN OF LOPSIDED WORK.
-//
-// Four rig ports over three pools, only two with a miner, and the opening
-// arrangement wedged BOTH live rigs onto one pool -- every rotation, for the
-// life of the process, because the offsets were frozen over all four phantom
-// ports. The live set is what has to be spread, not the configured set.
-func TestSpreadOffsetsSeparatesWedgedLiveRigs(t *testing.T) {
-	base := []int{0, 1, 2, 1}                // rigs 1 and 3 share offset 1
-	live := []bool{false, true, false, true} // only rigs 1 and 3 are hashing
-	out, moved := spreadOffsets(base, live, 3, 3, zeroRng())
-	if out[1]%3 == out[3]%3 {
-		t.Fatalf("live rigs still share a pool: offsets %v", out)
-	}
-	if out[3] != 1 {
-		t.Errorf("preferKeep rig should not move, got offsets %v", out)
-	}
-	if len(moved) != 1 || moved[0] != 1 {
-		t.Errorf("only the incumbent that collided should move, got %v", moved)
-	}
-}
-
-// A departure or arrival that does not create a collision must move nobody --
-// re-spreading an already-spread fleet would spend reconnects (hashrate) for
-// no gain, and spread-as-often-as-possible does not mean churn-for-its-own-sake.
-func TestSpreadOffsetsLeavesSpreadRigsAlone(t *testing.T) {
-	base := []int{0, 1, 2, 1}
-	live := []bool{true, true, false, false} // rigs 0,1 on offsets 0,1 -- distinct
-	out, moved := spreadOffsets(base, live, 3, -1, zeroRng())
-	if len(moved) != 0 {
-		t.Fatalf("already-spread rigs moved: %v (offsets %v)", moved, out)
-	}
-	if out[0] != 0 || out[1] != 1 {
-		t.Errorf("offsets of settled rigs changed: %v", out)
-	}
-}
-
-// When live rigs outnumber pools the guarantee weakens to balance, exactly as
-// the opening arrangement's does: no pool holds two more live rigs than another.
-func TestSpreadOffsetsBalancesWhenLiveExceedPools(t *testing.T) {
-	base := []int{0, 0, 0, 0} // all wedged onto one pool
-	live := []bool{true, true, true, true}
-	out, _ := spreadOffsets(base, live, 3, -1, zeroRng())
-	load := make([]int, 3)
-	for i, l := range live {
-		if l {
-			load[out[i]%3]++
-		}
-	}
-	lo, hi := load[0], load[0]
-	for _, n := range load[1:] {
-		if n < lo {
-			lo = n
-		}
-		if n > hi {
-			hi = n
-		}
-	}
-	if hi-lo > 1 {
-		t.Fatalf("live load not balanced: %v", load)
-	}
-}
-
-// The end-to-end path: a second live rig connecting onto a pool another live
-// rig already holds re-spreads through the real coordinator, closing the
-// incumbent's session (so it reconnects onto a free pool) and attributing the
-// gap to switchyard.
-func TestRespreadLiveMovesACollidingRigThroughTheCoordinator(t *testing.T) {
-	co := newCoordinator(scheduleConfig(4, 3))
-	co.base = []int{0, 1, 2, 1} // rigs 1 and 3 scheduled onto the same pool
-
-	s1 := liveSession(t, co, 1)
-	co.setSession(1, s1) // first live rig: nothing to spread against yet
-	select {
-	case <-s1.done:
-		t.Fatal("the first live rig was moved with no collision to fix")
-	default:
-	}
-
-	s3 := liveSession(t, co, 3)
-	co.setSession(3, s3) // collides with rig 1 -> respread moves the incumbent
-
-	select {
-	case <-s1.done:
-	case <-time.After(time.Second):
-		t.Fatal("wedged incumbent was not moved off the shared pool")
-	}
-	if !s1.rotated {
-		t.Error("the move was not attributed to switchyard; its gap would read as a miner fault")
-	}
-	co.mu.Lock()
-	o1, o3 := co.base[1]%3, co.base[3]%3
-	co.mu.Unlock()
-	if o1 == o3 {
-		t.Fatalf("live rigs still share a pool after respread: %d == %d", o1, o3)
-	}
-}
-
-// liveSession builds a session on an arbitrary rig port with a real pipe behind
-// it, so close() has something to close. pipeSession is pinned to rig 0.
-func liveSession(t *testing.T, co *coordinator, rigIdx int) *rigSession {
-	t.Helper()
-	a, b := net.Pipe()
-	s := newRigSession(co, co.cfg.Rigs[rigIdx], rigIdx, a)
-	t.Cleanup(func() { s.close(); _ = b.Close() })
-	return s
-}
-
 func scheduleConfig(rigs, pools int) config {
 	c := config{}
 	for i := 0; i < rigs; i++ {
@@ -442,36 +509,6 @@ func scheduleConfig(rigs, pools int) config {
 	}
 	c.applyDefaults()
 	return c
-}
-
-// MORE RIGS THAN POOLS IS A SUPPORTED SHAPE, not a misconfiguration.
-//
-// Collision-freedom is impossible once R > P -- pigeonhole -- so the guarantee
-// weakens to "as evenly as arithmetic allows": every pool carries either
-// floor(R/P) or ceil(R/P) rigs at every step, and never a spread wider than
-// one. Nothing is dark. The README advertises any number of rigs against any
-// number of pools, so this is the half of that claim which is easy to break
-// without noticing.
-func TestMoreRigsThanPoolsStaysEvenlySpread(t *testing.T) {
-	for pools := 2; pools <= 5; pools++ {
-		for rigs := pools + 1; rigs <= pools*3; rigs++ {
-			co := newCoordinator(scheduleConfig(rigs, pools))
-			lo, hi := rigs/pools, (rigs+pools-1)/pools
-			for step := 0; step < pools*2; step++ {
-				co.step = step
-				load := make([]int, pools)
-				for r := 0; r < rigs; r++ {
-					load[co.activePoolIdx(r)]++
-				}
-				for p, n := range load {
-					if n < lo || n > hi {
-						t.Fatalf("%d rigs / %d pools, step %d: pool %d carries %d rigs, want %d-%d",
-							rigs, pools, step, p, n, lo, hi)
-					}
-				}
-			}
-		}
-	}
 }
 
 // Resetting statistics moves the time base, so anything measured against it
@@ -522,7 +559,7 @@ func TestRigOnFallbackMovesWhenItsScheduledGatewayIsReady(t *testing.T) {
 	}
 	cfg.applyDefaults()
 	co := newCoordinator(cfg)
-	co.base[0] = 1 // scheduled on "b" at step 0
+	co.cur[0] = 1 // pin rig 0's scheduled pool to "b"
 
 	onFallback, _ := pipeSession(t, co, "w")
 	onFallback.up = co.ups[0][0]

@@ -6,7 +6,6 @@ import (
 	"log"
 	"math"
 	"math/rand/v2"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -22,8 +21,31 @@ type coordinator struct {
 	// protocol is fixed at construction (see newPoolLink).
 	ups [][]poolLink
 
-	// base is each rig's fixed starting pool offset, randomised at startup.
-	base []int
+	// cur is the current rig->pool placement: cur[i] is the pool rig i is on
+	// right now, and it is the single thing activePoolIdx reports. The balance
+	// scheduler rewrites it on every rotation (assignLocked) to steer each pool
+	// toward its target share. It replaces the old (base[i]+step)%P arithmetic,
+	// which could only ever divide the rotation evenly.
+	cur []int
+
+	// delivered[rig][pool] is how many seconds of that rig's time that pool has
+	// had: the quantity the targets divide and the scheduler balances.
+	//
+	// PER RIG, because that is what makes time stand in for hashrate. A rig that
+	// spends 47% of its own time on a pool gives that pool 47% of its hashrate,
+	// whatever size it is. A single tally per pool cannot do this: it counts an
+	// hour of a 16 TH/s rig and an hour of a 0.5 TH/s rig as equal, so with one
+	// dominant rig a pool could read on target while getting almost no hashrate.
+	//
+	// Time rather than measured work, because work carries share luck -- the
+	// pool's variance, not the split's -- and feeding that back would have the
+	// scheduler chase noise.
+	delivered [][]float64
+
+	// targets is each pool's intended fraction of delivered time, summing to 1,
+	// taken once from the config. An even split is just equal targets, so there
+	// is one scheduler and no special case for it.
+	targets []float64
 
 	startedAt time.Time
 
@@ -49,11 +71,15 @@ type coordinator struct {
 	// so a new tip's height is not a whole poll interval behind the tip.
 	gwKick chan struct{}
 
-	mu           sync.Mutex
-	step         int
-	rotations    int
-	lastPrevhash string
-	lastRotate   time.Time
+	mu        sync.Mutex
+	step      int
+	rotations int
+	// rotationsAtReset is rotations as of the last statistics reset. A reset
+	// restarts the work the fairness band is computed from without touching the
+	// rotation count, so the band's age is the difference between the two.
+	rotationsAtReset int
+	lastPrevhash     string
+	lastRotate       time.Time
 	// tipHeight is the chain height of the block whose hidden prevhash is
 	// tipHeightOf. Kept as a pair so a height is only ever shown against the
 	// tip it was read for: see noteGatewayTip.
@@ -138,8 +164,18 @@ func newCoordinator(cfg config) *coordinator {
 		waitingSince: filledNow(len(cfg.Rigs)),
 		everSeen:     make([]bool, len(cfg.Rigs)),
 		rotating:     make([]bool, len(cfg.Rigs)),
-		base:         randomBalancedStart(len(cfg.Rigs), len(cfg.Pools)),
+		targets:      cfg.targets(),
+		delivered:    make([][]float64, len(cfg.Rigs)),
+		cur:          make([]int, len(cfg.Rigs)),
 	}
+	for i := range co.delivered {
+		co.delivered[i] = make([]float64, len(cfg.Pools))
+	}
+	// Opening placement. delivered is all zero, so every deficit is zero and
+	// this spreads the rigs across pools -- balanced, and random on the ties --
+	// just as the old randomised start did, with no arrangement a restart could
+	// systematically favour.
+	co.assignLocked()
 	co.gw = newGatewayWatcher()
 	co.gwKick = make(chan struct{}, 1)
 	co.creds = make([]*credState, len(cfg.Rigs))
@@ -158,7 +194,7 @@ func newCoordinator(cfg config) *coordinator {
 
 func (co *coordinator) start(ctx context.Context) {
 	co.mu.Lock()
-	table := co.assignmentTableLocked(co.step, false)
+	table := co.assignmentTableLocked(nil)
 	co.mu.Unlock()
 	log.Printf("initial placement%s", table)
 
@@ -169,216 +205,140 @@ func (co *coordinator) start(ctx context.Context) {
 	}
 }
 
-// activePoolIdx is the whole scheduling policy: rig i at step t is on pool
-// (base[i] + t) mod P.
+// activePoolIdx is where rig i is placed right now. It simply reports the
+// current assignment; all the policy lives in assignLocked, which rewrites that
+// assignment at startup and on every rotation.
 //
-// Each rig keeps a fixed offset, so two rigs with different offsets can never
-// collide -- their separation is constant. With R rigs and P pools exactly
-// P-R pools are dark at any moment, the arithmetic minimum; doubling rigs onto
-// one pool would leave more of them dark, never fewer.
-//
-// Whatever the offsets are, every rig still visits every pool exactly once per
-// P steps, so each pool's average is the same regardless of the starting
-// arrangement. That is what makes randomising the start safe.
-//
-// The offsets are not frozen for the life of the process. randomBalancedStart
-// seeds them over every CONFIGURED rig, but a configured port with no miner is
-// a phantom that would otherwise wedge two real rigs onto one pool for a whole
-// run. So the LIVE rigs' offsets are recomputed whenever the live set changes
-// (respreadLive) -- still fixed BETWEEN changes, so everything above holds
-// within a stable live set, just computed over the rigs that are hashing.
+// Caller must hold co.mu: cur is written under the lock in rotate, and every
+// reader here already holds it.
 func (co *coordinator) activePoolIdx(rigIdx int) int {
-	return (co.base[rigIdx] + co.step) % len(co.cfg.Pools)
+	return co.cur[rigIdx]
 }
 
-// randomBalancedStart picks a random but evenly-spread opening arrangement.
+// spreadDwells is how strongly a rig prefers a pool with no rig on it this round,
+// in average dwells of deficit. It is a tiebreak, not a goal, because hitting the
+// split comes first: a rig only takes the emptier pool when the two are close.
 //
-// The counter resets to zero on every restart, so a fixed opening arrangement
-// means a fixed set of pools is favoured every time the process starts. Over a
-// week of deploys that is a real, systematic bias against whichever pools sit
-// late in the cycle -- the one place this scheme's evenness guarantee does not
-// hold, because the guarantee is per COMPLETE cycle and a restart truncates it.
+// Measured across fleets and splits. At 0.25 the split is as accurate as with no
+// tiebreak at all, and on a fleet of one 16.8 TH/s rig and five small ones a pool
+// with a target sits empty 4% of the time instead of 42%. From 1 upward it starts
+// costing accuracy, and at 4 a day's miss is more than three times as large.
+const spreadDwells = 0.25
+
+// assignLocked recomputes the rig->pool placement to steer each rig's time toward
+// the target split. It is the whole scheduling policy, and it runs once at startup
+// and once per rotation. Caller holds co.mu.
 //
-// Each rig goes to a uniformly random choice among the LEAST-loaded pools.
-// Least-loaded rather than empty is what makes this work when rigs outnumber
-// pools: there is never a point where the candidate set is empty, because when
-// every pool is equally loaded, every pool qualifies.
-func randomBalancedStart(nRigs, nPools int) []int {
-	base := make([]int, nRigs)
-	load := make([]int, nPools)
-	cand := make([]int, 0, nPools)
-
-	for i := range base {
-		lo := load[0]
-		for _, n := range load[1:] {
-			if n < lo {
-				lo = n
-			}
-		}
-		cand = cand[:0]
-		for p, n := range load {
-			if n == lo {
-				cand = append(cand, p)
-			}
-		}
-		p := cand[rand.IntN(len(cand))]
-		base[i] = p
-		load[p]++
-	}
-	return base
-}
-
-// spreadOffsets revises pool offsets so the LIVE rigs sit on distinct pools --
-// balanced when they outnumber pools -- while moving as few rigs as it can.
+// The rule is the "balance" scheduler, applied to each rig on its own. A pool is
+// BEHIND on a rig by how much its target share of that rig's time so far exceeds
+// what it has actually had:
 //
-// It works in offset space alone, which is the whole trick. A rig is on pool
-// (base[i]+step) mod P and every rig advances by the same step, so two live
-// rigs are on distinct pools at EVERY step precisely when their offsets differ
-// mod P. Handing the live rigs distinct offsets therefore spreads them for all
-// rotations at once; there is nothing to recompute per block.
+//	behind[rig][p] = target[p] * sum(delivered[rig]) - delivered[rig][p]
 //
-// preferKeep is a rig to settle first, so a contested pool stays with it and
-// the move lands on the other rig. On a new connection it is the newcomer: the
-// rig already hashing keeps its socket and the arriving one yields -- which is
-// also why respreadLive only ever closes an established session, never the one
-// still being set up. -1 means no preference.
+// and the rig goes to the pool furthest behind, less a small preference for pools
+// no other rig has been sent to this round (see spreadDwells). Rigs can share a
+// pool while others sit empty when their deficits say so; that is accepted, because
+// each rig holding the split on its own is what makes the hashrate hold it too.
 //
-// rng(n) returns a value in [0,n); it breaks ties so no pool is systematically
-// the one left dark or doubled. The result is the revised offsets and the rigs
-// whose offset changed -- the ones that must reconnect onto their new pool.
-func spreadOffsets(base []int, live []bool, nPools, preferKeep int, rng func(int) int) (out []int, moved []int) {
-	out = append([]int(nil), base...)
-	if nPools <= 0 {
-		return out, nil
-	}
-	var liveIdx []int
-	for i, l := range live {
-		if l {
-			liveIdx = append(liveIdx, i)
-		}
-	}
-	if len(liveIdx) == 0 {
-		return out, nil
-	}
-
-	// Capacity per offset: floor(L/P) everywhere, the remainder handed to the
-	// offsets that already carry the most live rigs so the fewest have to move.
-	// Ties for the remainder are random.
-	L := len(liveIdx)
-	capa := make([]int, nPools)
-	for o := range capa {
-		capa[o] = L / nPools
-	}
-	if extra := L % nPools; extra > 0 {
-		load := make([]int, nPools)
-		for _, i := range liveIdx {
-			load[out[i]%nPools]++
-		}
-		for _, o := range topLoaded(load, extra, rng) {
-			capa[o]++
-		}
-	}
-
-	// Settle preferKeep first so it holds its offset; the rest follow. A rig
-	// whose offset still has room stays; the overflow is what moves.
-	order := make([]int, 0, L)
-	if preferKeep >= 0 && preferKeep < len(live) && live[preferKeep] {
-		order = append(order, preferKeep)
-	}
-	for _, i := range liveIdx {
-		if i != preferKeep {
-			order = append(order, i)
-		}
-	}
-
-	used := make([]int, nPools)
-	var overflow []int
-	for _, i := range order {
-		if o := out[i] % nPools; used[o] < capa[o] {
-			used[o]++
-		} else {
-			overflow = append(overflow, i)
-		}
-	}
-	// Place the overflow on offsets with room, random among them. cands is
-	// never empty: total capacity equals the number of live rigs.
-	for _, i := range overflow {
-		var cands []int
-		for o := range nPools {
-			if used[o] < capa[o] {
-				cands = append(cands, o)
-			}
-		}
-		pick := cands[rng(len(cands))]
-		out[i] = pick
-		used[pick]++
-		moved = append(moved, i)
-	}
-	return out, moved
-}
-
-// topLoaded returns k offsets with the highest load, ties broken by rng so the
-// remainder capacity is not handed to the same offsets every time.
-func topLoaded(load []int, k int, rng func(int) int) []int {
-	idx := make([]int, len(load))
-	for i := range idx {
-		idx[i] = i
-	}
-	for i := len(idx) - 1; i > 0; i-- {
-		j := rng(i + 1)
-		idx[i], idx[j] = idx[j], idx[i]
-	}
-	sort.SliceStable(idx, func(a, b int) bool { return load[idx[a]] > load[idx[b]] })
-	if k > len(idx) {
-		k = len(idx)
-	}
-	return idx[:k]
-}
-
-// respreadLive re-spreads the live rigs after the live set changed, and
-// reconnects only the rigs that must move. preferKeep is a rig to leave in
-// place (the one whose connection just triggered this), or -1.
+// One large rig cannot be divided, so it moves as a lump and the shares swing until
+// enough blocks have gone by to smooth it out. That is the nature of the fleet and
+// not something a scheduler can remove.
 //
-// This is the dynamic half of the scheduling policy, and it exists because the
-// opening arrangement spreads every CONFIGURED rig -- including ports with no
-// miner. Those phantoms take offsets, and with four ports over three pools that
-// routinely wedged the two real rigs onto one pool for an entire run. So the
-// instant the live set changes, the offsets are recomputed over the rigs that
-// are actually hashing.
-//
-// It re-spreads immediately on any connect or disconnect, even inside the dwell
-// floor. That is a deliberate trade: live rigs landing on distinct pools as
-// often as possible is worth more here than the even-split fairness band, whose
-// constant-separation assumption this weakens. The band already errs wide and
-// is gated on a full cycle, so it degrades rather than lies.
-func (co *coordinator) respreadLive(preferKeep int) {
-	co.mu.Lock()
-	live := make([]bool, len(co.sessions))
-	for i := range co.sessions {
-		live[i] = len(co.sessions[i]) > 0
-	}
-	newBase, moved := spreadOffsets(co.base, live, len(co.cfg.Pools), preferKeep, rand.IntN)
-	if len(moved) == 0 {
-		co.mu.Unlock()
+// Unlike the old (base[i]+step)%P scheme this gives soft, statistical evenness
+// rather than a hard per-cycle guarantee -- the price of handling uneven splits
+// at all, and of one scheduler instead of two.
+func (co *coordinator) assignLocked() {
+	nP, nR := len(co.cfg.Pools), len(co.cfg.Rigs)
+	if nP == 0 || nR == 0 {
 		return
 	}
-	co.base = newBase
-	// Close the moved rigs' sessions so they reconnect onto their new pool, and
-	// attribute the gap to switchyard exactly as a rotation does. Marked and
-	// collected under the lock; closed outside it, as rotate does.
-	var victims []downstreamSession
-	for _, i := range moved {
-		for _, s := range co.sessions[i] {
-			s.markRotated()
-			victims = append(victims, s)
+	// A pool set to 0% is not a candidate at all, rather than one that scores
+	// badly. Scoring cannot express "never": with nothing delivered every deficit
+	// is zero, so it ties with the real pools at startup, and the spreading
+	// preference can make it the best score whenever rigs outnumber the pools that
+	// want them. validate guarantees shares total 100, so this is never empty on
+	// a config that reached here; the guard is what keeps that from being a panic
+	// if that ever stops being true.
+	eligible := make([]int, 0, nP)
+	for p := range co.targets {
+		if co.targets[p] > 0 {
+			eligible = append(eligible, p)
 		}
 	}
-	table := co.assignmentTableLocked(co.step, false)
-	co.mu.Unlock()
+	if len(eligible) == 0 {
+		return
+	}
+	penalty := spreadDwells * co.avgDwellLocked()
+	sent := make([]int, nP)
+	cands := make([]int, 0, nP)
+	// Randomised rig order so no rig always gets first pick of the empty pools.
+	for _, i := range rand.Perm(nR) {
+		rigTotal := 0.0
+		for _, d := range co.delivered[i] {
+			rigTotal += d
+		}
+		score := func(p int) float64 {
+			return co.targets[p]*rigTotal - co.delivered[i][p] - penalty*float64(sent[p])
+		}
+		best := math.Inf(-1)
+		for _, p := range eligible {
+			if s := score(p); s > best {
+				best = s
+			}
+		}
+		// Every pool within rounding of the best score is a true tie; pick among
+		// them at random so the opening placement, where every deficit is zero,
+		// carries no fixed bias -- exactly what the old randomised start did.
+		cands = cands[:0]
+		for _, p := range eligible {
+			if s := score(p); s >= best-1e-9 {
+				cands = append(cands, p)
+			}
+		}
+		p := cands[rand.IntN(len(cands))]
+		co.cur[i] = p
+		sent[p]++
+	}
+}
 
-	log.Printf("re-spread live rigs%s", table)
-	for _, s := range victims {
-		s.close()
+// avgDwellLocked is the mean time between rotations, which sizes spreadDwells to
+// the chain's own block rate: a rig's total delivered time divided by the rotations
+// that produced it. Every rig is credited every dwell, so any rig will do. Before
+// anything has been delivered it falls back to the dwell floor, a stand-in for one
+// dwell's length. Caller holds co.mu.
+func (co *coordinator) avgDwellLocked() float64 {
+	if co.rotations <= 0 || len(co.delivered) == 0 {
+		return float64(co.cfg.MinDwellSeconds)
+	}
+	total := 0.0
+	for _, d := range co.delivered[0] {
+		total += d
+	}
+	if total <= 0 {
+		return float64(co.cfg.MinDwellSeconds)
+	}
+	return total / float64(co.rotations)
+}
+
+// settleDeliveredLocked credits the dwell that just ended to the pool each rig
+// spent it on, so the next assignment can see who is now behind. Caller holds
+// co.mu.
+//
+// Every assigned rig is credited the full dwell, whether or not a miner was
+// actually on it. The targets describe where work is INTENDED to go; a rig that
+// is physically absent is a presence problem the operator sees elsewhere, not a
+// reason to quietly reweight the split toward the pools the working rigs happen
+// to sit on.
+func (co *coordinator) settleDeliveredLocked(now time.Time) {
+	if co.lastRotate.IsZero() {
+		return
+	}
+	dwell := now.Sub(co.lastRotate).Seconds()
+	if dwell <= 0 {
+		return
+	}
+	for i := range co.cur {
+		co.delivered[i][co.cur[i]] += dwell
 	}
 }
 
@@ -389,6 +349,11 @@ func (co *coordinator) respreadLive(preferKeep int) {
 // slot is strictly better than a rig sitting idle because one gateway
 // happens to be down -- and gateways do go down, as maveth's version
 // rejection demonstrated.
+//
+// The one exception is a pool set to 0%: the operator asked for that pool to get
+// nothing, and an outage elsewhere does not change the answer. So if only 0%
+// gateways are up, the rig gets no gateway, its connection drops and the miner
+// retries until a pool it is allowed on comes back.
 func (co *coordinator) upstreamForRig(rigIdx int) (poolLink, bool) {
 	co.mu.Lock()
 	want := co.activePoolIdx(rigIdx)
@@ -398,6 +363,9 @@ func (co *coordinator) upstreamForRig(rigIdx int) (poolLink, bool) {
 		return u, true
 	}
 	for j := range co.ups[rigIdx] {
+		if co.targets[j] <= 0 {
+			continue
+		}
 		if u := co.ups[rigIdx][j]; u.isReady() {
 			log.Printf("[%s] scheduled pool %s unavailable; falling back to %s",
 				co.rigLabel(rigIdx), co.cfg.Pools[want].displayName(), u.displayName())
@@ -564,10 +532,13 @@ func (co *coordinator) rotate(reason string) {
 	}
 
 	co.mu.Lock()
-	prevStep := co.step
+	now := time.Now()
+	// Credit the dwell that just ended before the placement changes, so the new
+	// assignment is computed against who is actually behind as of this instant.
+	co.settleDeliveredLocked(now)
 	co.step++
 	co.rotations++
-	co.lastRotate = time.Now()
+	co.lastRotate = now
 	step := co.step
 	victims := co.allSessionsLocked()
 	// Mark the SESSIONS we are about to drop, so the gap each one leaves
@@ -586,7 +557,12 @@ func (co *coordinator) rotate(reason string) {
 	for _, s := range victims {
 		s.markRotated()
 	}
-	table := co.assignmentTableLocked(prevStep, true)
+	// Snapshot the placement we are leaving, for the "from" column, then steer
+	// toward the targets. The new assignment is what every reconnecting rig
+	// will bind to.
+	prevCur := append([]int(nil), co.cur...)
+	co.assignLocked()
+	table := co.assignmentTableLocked(prevCur)
 	co.mu.Unlock()
 
 	log.Printf("%s -> rotation #%d%s", reason, step, table)
@@ -628,6 +604,7 @@ func (co *coordinator) resetStats() {
 	}
 	co.mu.Lock()
 	co.startedAt = time.Now()
+	co.rotationsAtReset = co.rotations
 	// With the time base. See rotationCost.
 	co.cost = rotationCost{}
 	co.mu.Unlock()
@@ -642,9 +619,9 @@ func (co *coordinator) resetStats() {
 // listing every pool means the idle one is visible as a line rather than as an
 // absence you have to notice.
 //
-// prevStep is the placement this rotation moved away from, so each rig can say
-// where it came from.
-func (co *coordinator) assignmentTableLocked(prevStep int, showFrom bool) string {
+// prevCur is the placement this rotation moved away from, so each rig can say
+// where it came from; nil on the opening placement, which came from nowhere.
+func (co *coordinator) assignmentTableLocked(prevCur []int) string {
 	width := 0
 	for _, p := range co.cfg.Pools {
 		if len(p.displayName()) > width {
@@ -652,13 +629,12 @@ func (co *coordinator) assignmentTableLocked(prevStep int, showFrom bool) string
 		}
 	}
 
-	// Invert the rig->pool mapping for the step we are rendering. A pool can
-	// hold several rigs once rigs outnumber pools, so this collects them all
-	// rather than keeping only the last one found.
+	// Invert the current rig->pool mapping. A pool can hold several rigs once
+	// rigs outnumber pools, so this collects them all rather than keeping only
+	// the last one found.
 	occupants := make([][]int, len(co.cfg.Pools))
 	for i := range co.cfg.Rigs {
-		p := co.activePoolIdx(i)
-		occupants[p] = append(occupants[p], i)
+		occupants[co.cur[i]] = append(occupants[co.cur[i]], i)
 	}
 
 	var b strings.Builder
@@ -674,9 +650,8 @@ func (co *coordinator) assignmentTableLocked(prevStep int, showFrom bool) string
 				b.WriteString(", ")
 			}
 			b.WriteString(co.rigLabel(i))
-			if showFrom {
-				from := co.cfg.Pools[(co.base[i]+prevStep)%len(co.cfg.Pools)].displayName()
-				fmt.Fprintf(&b, " (from %s)", from)
+			if prevCur != nil {
+				fmt.Fprintf(&b, " (from %s)", co.cfg.Pools[prevCur[i]].displayName())
 			}
 		}
 	}
@@ -699,21 +674,13 @@ func (co *coordinator) setSession(rigIdx int, s downstreamSession) {
 	// what the rotation cost.
 	// Only the first miner back ends the wait; a second one joining a live
 	// port is not a reconnect.
-	becameLive := len(co.sessions[rigIdx]) == 0
-	if becameLive {
+	if len(co.sessions[rigIdx]) == 0 {
 		co.recordRotationGapLocked(rigIdx)
 		co.waitingSince[rigIdx] = time.Time{}
 	}
 	co.sessions[rigIdx] = append(co.sessions[rigIdx], s)
 	co.everSeen[rigIdx] = true
 	co.mu.Unlock()
-
-	// A port going from empty to occupied changes the live set: re-spread so
-	// this rig lands on a pool no other live rig holds, keeping it in place and
-	// moving an incumbent only if they would otherwise collide.
-	if becameLive {
-		co.respreadLive(rigIdx)
-	}
 }
 
 // recordRotationGapLocked times a rig's return, if switchyard is what sent it
@@ -772,7 +739,6 @@ func (co *coordinator) otherMiners(rigIdx int, s downstreamSession) int {
 
 func (co *coordinator) clearSession(rigIdx int, s downstreamSession) {
 	co.mu.Lock()
-	becameDead := false
 	ss := co.sessions[rigIdx]
 	for i, x := range ss {
 		if x != s {
@@ -786,18 +752,10 @@ func (co *coordinator) clearSession(rigIdx int, s downstreamSession) {
 			// means recording it about a different moment.
 			co.waitingSince[rigIdx] = time.Now()
 			co.rotating[rigIdx] = s.rotatedByUs()
-			becameDead = true
 		}
 		break
 	}
 	co.mu.Unlock()
-
-	// A port emptying changes the live set too. With fewer live rigs than pools
-	// the survivors are already distinct and nothing moves; it earns its keep
-	// when rigs outnumber pools, where a departure can free a doubled pool.
-	if becameDead {
-		co.respreadLive(-1)
-	}
 }
 
 type gatewayStatus struct {
@@ -911,8 +869,8 @@ type poolStatus struct {
 	ExpectedPct float64 `json:"expectedPct"`
 
 	// SigmaPct is one standard deviation of this pool's share, in percentage
-	// points, and Sigmas is how many of them the observed share sits from an
-	// even split. See sigmaPct for the model and its caveat.
+	// points, and Sigmas is how many of them the observed share sits from its
+	// target. See sigmaPct for the model and its caveat.
 	SigmaPct float64 `json:"sigmaPct"`
 	Sigmas   float64 `json:"sigmas"`
 }
@@ -938,8 +896,11 @@ type statusDoc struct {
 	// show a setup form instead of an empty dashboard.
 	Configured bool `json:"configured"`
 
-	Step                 int       `json:"step"`
-	Rotations            int       `json:"rotations"`
+	Step      int `json:"step"`
+	Rotations int `json:"rotations"`
+	// BandRotations is how many rotations the fairness band's numbers span: the
+	// rotations since the last statistics reset.
+	BandRotations        int       `json:"bandRotations"`
 	LastPrevhash         string    `json:"lastPrevhash"`
 	TipHeight            uint64    `json:"tipHeight,omitempty"` // height of LastPrevhash's block; see tipHeightFor
 	LastRotate           time.Time `json:"lastRotate"`
@@ -962,9 +923,8 @@ type statusDoc struct {
 	ReconnectWorstSeconds float64 `json:"reconnectWorstSeconds"`
 	RotationCostPct       float64 `json:"rotationCostPct"`
 
-	// Banded reports whether the fairness band means anything yet. See the
-	// gate in status() -- before one full cycle the model does not apply and
-	// no pool should be coloured.
+	// Banded reports whether any pool has a fairness band to draw: true from the
+	// first share, unless no pool has a target strictly between 0 and 100.
 	Banded bool `json:"banded"`
 	// Outbound is every socket switchyard holds open to another machine. See
 	// outbound.go for why a self-reported list is still worth publishing.
@@ -975,13 +935,15 @@ type statusDoc struct {
 }
 
 // sigmaPct is one standard deviation of a pool's share of total work, in
-// percentage points.
+// percentage points, for a pool whose intended share is p.
 //
 // The model: the rotation hands one rig's output for one dwell to one pool.
-// Treat each of those DWELL CHUNKS as landing independently on one of P pools
-// with probability p = 1/P. A pool's work is then a sum of independent terms,
-// so Var(W_j) = p(1-p) * sum(c_k^2) and the standard deviation of its SHARE is
-// sqrt(p(1-p)*sum(c^2)) / W_total.
+// Treat each of those DWELL CHUNKS as landing on this pool with probability p
+// -- the pool's target share -- independently of the others. Its work is then a
+// sum of independent terms, so Var(W_j) = p(1-p) * sum(c_k^2) and the standard
+// deviation of its SHARE is sqrt(p(1-p)*sum(c^2)) / W_total. An even split is
+// just p = 1/P, so this is the same band it has always been when the targets
+// are equal, now drawn per pool around whatever share each one was asked for.
 //
 // THE UNIT IS THE WHOLE ARGUMENT. An earlier version of this summed squared
 // share difficulty instead, which quietly asserted that every share was
@@ -1000,21 +962,24 @@ type statusDoc struct {
 //
 // CAVEATS, and both point the same way -- the band is WIDER than the truth:
 //
-//  1. The rotation is not random, it is a cyclic schedule. That is stratified
-//     sampling, which has strictly less variance than this independent model.
-//  2. With more rigs than one, the rigs are placed on DISTINCT pools in any
-//     given dwell. Those chunks are negatively correlated, which the model
-//     ignores, and negative correlation reduces the variance of the total
-//     further.
+//  1. The rotation is not random. Each rig goes wherever it is furthest behind,
+//     so a dwell that overshoots a pool is corrected by the next ones instead of
+//     adding to the error as an independent draw would. The real miss shrinks
+//     about as 1/rotations against this band's 1/sqrt(rotations), so a healthy
+//     pool sits deeper inside the band the longer a run goes on.
+//  2. The spreading preference steers rigs apart when their deficits are close.
+//     Those chunks are negatively correlated, which the model ignores, and
+//     negative correlation reduces the variance of the total further.
 //
 // Erring wide is the right direction for a band whose job is to stay quiet
 // unless something is actually wrong. But it means sitting inside the band is
 // weaker evidence of fairness than falling outside it is of unfairness.
-func sigmaPct(chunkSq float64, totalWork uint64, nPools int) float64 {
-	if totalWork == 0 || nPools <= 1 || chunkSq <= 0 {
+func sigmaPct(chunkSq float64, totalWork uint64, p float64) float64 {
+	// p outside (0,1) has no band: a pool asked for nothing (0) expects nothing,
+	// and a pool asked for everything (1) has no other pool to vary against.
+	if totalWork == 0 || p <= 0 || p >= 1 || chunkSq <= 0 {
 		return 0
 	}
-	p := 1.0 / float64(nPools)
 	return math.Sqrt(p*(1-p)*chunkSq) / float64(totalWork) * 100
 }
 
@@ -1056,6 +1021,7 @@ func (co *coordinator) status() statusDoc {
 		Configured:            co.cfg.configured(),
 		Step:                  co.step,
 		Rotations:             co.rotations,
+		BandRotations:         co.rotations - co.rotationsAtReset,
 		LastPrevhash:          co.lastPrevhash,
 		TipHeight:             co.tipHeightFor(co.lastPrevhash),
 		LastRotate:            co.lastRotate,
@@ -1201,41 +1167,33 @@ func (co *coordinator) status() statusDoc {
 	}
 
 	doc.TotalThs = thsFromWork(totalWork, elapsed)
-	evenPct := 100.0 / float64(len(pools))
-	sigma := sigmaPct(totalChunkSq, totalWork, len(pools))
 
-	// THE BAND DOES NOT APPLY UNTIL EVERY POOL HAS HAD A TURN.
+	// The band applies from the first share, with no warm-up. The balance
+	// scheduler has no cycle to wait for, and few dwells already make the band
+	// wide: sum(c^2)/W^2 is largest when one chunk is all of the work. With
+	// ordinary splits that keeps early readings out of the red on its own. A very
+	// small target can still read red for hours, because one whole dwell is a
+	// large overshoot of it, but a warm-up short enough to be worth having would
+	// not have outlasted that anyway.
 	//
-	// sigmaPct models shares as landing on a random pool, but the schedule is
-	// cyclic: a pool that has not come up yet has zero work with CERTAINTY,
-	// not by bad luck. Feeding that certainty into a luck model produces
-	// nonsense -- three minutes after start the unvisited pool sits at 0% of
-	// an expected 33%, which the model dutifully reports as a three-sigma
-	// scandal and paints red.
-	//
-	// So the band is withheld until a full cycle has completed AND every pool
-	// has actually delivered work. That matches what the scheme guarantees:
-	// evenness holds per complete cycle, and says nothing within one.
-	everyPoolVisited := true
+	// A pool whose target is 0 or 100 has no spread to measure and gets no sigma.
 	for j := range pools {
-		if pools[j].Work == 0 {
-			everyPoolVisited = false
-			break
-		}
-	}
-	doc.Banded = doc.Rotations >= len(pools) && everyPoolVisited && sigma > 0
-	if !doc.Banded {
-		sigma = 0
-	}
-	for j := range pools {
+		tgt := co.targets[j]
 		pools[j].Ths = thsFromWork(pools[j].Work, elapsed)
-		pools[j].ExpectedThs = doc.TotalThs / float64(len(pools))
-		pools[j].ExpectedPct = evenPct
+		// Expectation follows the TARGET, not an even 1/P: a pool asked for 20%
+		// is doing fine at 20% and starved at 5%, and the band has to be drawn
+		// around the number the operator actually chose.
+		pools[j].ExpectedThs = doc.TotalThs * tgt
+		pools[j].ExpectedPct = tgt * 100
+		sigma := sigmaPct(totalChunkSq, totalWork, tgt)
+		if sigma > 0 {
+			doc.Banded = true
+		}
 		pools[j].SigmaPct = sigma
 		if totalWork > 0 {
 			pools[j].SharePct = float64(pools[j].Work) / float64(totalWork) * 100
 			if sigma > 0 {
-				pools[j].Sigmas = (pools[j].SharePct - evenPct) / sigma
+				pools[j].Sigmas = (pools[j].SharePct - pools[j].ExpectedPct) / sigma
 			}
 		}
 	}

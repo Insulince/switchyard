@@ -129,9 +129,18 @@ func main() {
 			log.Printf("switchyard: %d rigs %v across %d pools, dwell %ds-%ds",
 				len(cfg.Rigs), co.rigLabels(), len(cfg.Pools),
 				cfg.MinDwellSeconds, cfg.MaxDwellSeconds)
-			if len(cfg.Rigs) < len(cfg.Pools) {
-				log.Printf("note: %d pool(s) will be dark at any moment -- unavoidable with fewer rigs than pools",
-					len(cfg.Pools)-len(cfg.Rigs))
+			// "At least", because the scheduler can double rigs up when their
+			// deficits say so. A 0% pool is not counted: having no rig is what
+			// it was asked for, not a consequence of the fleet's size.
+			sharing := 0
+			for _, tgt := range cfg.targets() {
+				if tgt > 0 {
+					sharing++
+				}
+			}
+			if len(cfg.Rigs) < sharing {
+				log.Printf("note: at least %d pool(s) will be dark at any moment -- unavoidable with fewer rigs than pools",
+					sharing-len(cfg.Rigs))
 			}
 			go func() {
 				defer close(gateDone)

@@ -1,9 +1,11 @@
 # switchyard
 
 A stratum proxy that rotates mining rigs across DATUM gateways so every pool
-gets an even share of work. Single Go binary with minimal, purpose-chosen
-dependencies -- we add only what we genuinely need (the SV2 Noise suite needs
-real crypto) and keep the set small -- and the dashboard embedded via `go:embed`.
+gets its target share of work -- an even split by default, or a custom per-pool
+split (including the solo gateway). Single Go binary with minimal,
+purpose-chosen dependencies -- we add only what we genuinely need (the SV2 Noise
+suite needs real crypto) and keep the set small -- and the dashboard embedded
+via `go:embed`.
 
 ## Before you finish any change
 

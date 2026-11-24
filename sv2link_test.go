@@ -303,7 +303,9 @@ func approx(got, want, tol float64) bool {
 // here, so the SV2 link never opens; the point is only that it is not chosen.)
 func TestUnreadySv2PoolIsNeverSelected(t *testing.T) {
 	co := newCoordinator(mixedProtoConfig(t))
-	co.base[0] = 1 // schedule rig 0 onto the SV2 pool
+	co.mu.Lock()
+	co.cur[0] = 1 // schedule rig 0 onto the SV2 pool
+	co.mu.Unlock()
 	if u, ok := co.upstreamForRig(0); ok {
 		if _, isSv2 := u.(*sv2Link); isSv2 {
 			t.Error("upstreamForRig handed a rig to an SV2 link whose channel is not open")

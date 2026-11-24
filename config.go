@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -74,6 +76,28 @@ type poolConfig struct {
 	// than a hijacker, which is the whole point of SV2 authentication. The
 	// format is decoded and pinned in sv2key.go.
 	AuthorityKey string `json:"authorityKey,omitempty"`
+
+	// Share is this pool's intended percentage of hashrate-time: a 0..100
+	// value, carried to two decimals, that across all pools divides the rotation
+	// unevenly instead of evenly. The solo slot carries one like any other pool
+	// -- it is the whole reason this field exists, since the point of an uneven
+	// split is most often to dial how much time rides on solo.
+	//
+	// Two decimals rather than whole percents because the proportional editor
+	// routinely lands on them: adjust one pool of four and the other three take
+	// a third of the remainder each, which is rarely a round number.
+	//
+	// A POINTER so "unset" and "set to 0" are different facts. An even split is
+	// the absence of shares, not a page full of equal numbers -- so nil means
+	// "no opinion, split evenly" and is the default every existing config
+	// already has, while a non-nil 0 means "this pool, deliberately, gets
+	// nothing right now". A plain number could not tell those apart: encoding/json
+	// omits a zero under omitempty, so an explicit 0 would vanish on save
+	// and read back as "unset". The pointer is the price of representing a
+	// paused pool honestly.
+	//
+	// All-or-nothing and summing to 100 are enforced in validate, not here.
+	Share *float64 `json:"share,omitempty"`
 }
 
 // stratumAddr is the endpoint switchyard actually opens a socket to.
@@ -183,6 +207,13 @@ func (r rigConfig) authorityPriv() (*btcec.PrivateKey, error) {
 const (
 	authSecretKeep     = "__keep__"     // reuse the secret already on file for this listener
 	authSecretGenerate = "__generate__" // mint a fresh one on save (legacy fallback)
+	// keepPrefix is the port-qualified keep: "__keep__:23401" reuses the secret
+	// on file for port 23401, whatever port the rig is on now. It is what the
+	// dashboard is handed (see keepSentinel), because a rig's port is editable:
+	// an identity resolved by the rig's CURRENT port would be lost, or worse
+	// handed to a different rig, the moment a port was remapped. The bare
+	// __keep__ still means "the secret on file for this rig's own port".
+	keepPrefix = authSecretKeep + ":"
 	// stagedPrefix marks an authoritySecret as a handle into the server's staged
 	// store: a secret the editor generated in-screen and parked server-side, to
 	// be swapped for the real secret on save (see server.consumeStaged). It is a
@@ -190,16 +221,28 @@ const (
 	stagedPrefix = "__staged__:"
 )
 
+// keepSentinel is the keep value for the secret on file under port: what the
+// dashboard sees in place of that secret, and sends back to keep it.
+func keepSentinel(port int) string { return keepPrefix + strconv.Itoa(port) }
+
+// isIdentitySentinel reports whether an authoritySecret is a dashboard
+// placeholder rather than a credential.
+func isIdentitySentinel(sec string) bool {
+	return sec == authSecretKeep || sec == authSecretGenerate || strings.HasPrefix(sec, keepPrefix)
+}
+
 // resolveRigIdentities turns the dashboard's SV2 identity sentinels into real
 // authority secrets before the incoming config is validated or written:
 // __generate__ mints a fresh secret, __keep__ copies the one already on file for
-// that listener, and a hand-supplied hex secret is left untouched. It runs on
+// that listener (__keep__:<port>, the one on file for that port), and a
+// hand-supplied hex secret is left untouched. It runs on
 // the save path only (see saveAndReload), so by the time validate runs, every
 // secret is real -- the sentinels never reach disk or the validator.
 //
 // running is the config switchyard is serving right now, the source of the
-// "keep" secrets. Listeners are matched by port, which is a rig's whole stable
-// identity across an edit.
+// "keep" secrets, matched by the port each one is on file under. A rig's port
+// can be edited in the same save, so a qualified keep names the ORIGINAL port
+// and the identity follows the rig to its new one.
 func resolveRigIdentities(incoming *config, running config) error {
 	prior := map[int]string{}
 	for _, r := range running.Rigs {
@@ -212,9 +255,19 @@ func resolveRigIdentities(incoming *config, running config) error {
 		if r.proto() != "sv2" {
 			// A sentinel left behind by an sv2 -> sv1 flip is not a credential;
 			// drop it so validate does not reject the sv1 rig for carrying one.
-			if r.AuthoritySecret == authSecretKeep || r.AuthoritySecret == authSecretGenerate {
+			if isIdentitySentinel(r.AuthoritySecret) {
 				r.AuthoritySecret = ""
 			}
+			continue
+		}
+		if from, ok := strings.CutPrefix(r.AuthoritySecret, keepPrefix); ok {
+			port, err := strconv.Atoi(from)
+			prev := prior[port]
+			if err != nil || prev == "" {
+				return fmt.Errorf("rig %d: asked to keep the SV2 identity on file for port %s, "+
+					"but there is none -- generate one or provide your own", r.Port, from)
+			}
+			r.AuthoritySecret = prev
 			continue
 		}
 		switch r.AuthoritySecret {
@@ -508,6 +561,11 @@ func (c *config) validate() error {
 					"remove its name (%q)", i, p.Name)
 			}
 		}
+		// Reserved whether or not a solo gateway is configured, so "solo" on a
+		// card always means the solo gateway.
+		if strings.EqualFold(strings.TrimSpace(p.Name), "solo") {
+			return fmt.Errorf("pool %d: the name %q is reserved for the solo gateway", i, p.Name)
+		}
 		// The address first: two entries on one gateway is a mistake about
 		// the address, and an unnamed entry's label IS its address, so
 		// checking labels first reported it as a "duplicate pool name" the
@@ -517,8 +575,12 @@ func (c *config) validate() error {
 		}
 		// On the label, not the raw name: the label is what everything keys
 		// on, and unnamed entries have one too.
+		// Every solo entry is labelled "solo", so a second one would collide here
+		// and be told about a "duplicate pool name" it never had. The one-solo
+		// rule below is what is actually wrong, and it always fires after the
+		// loop once solos passes 1.
 		label := p.displayName()
-		if seenPool[label] {
+		if seenPool[label] && solos < 2 {
 			return fmt.Errorf("duplicate pool name %q", label)
 		}
 		seenPool[label] = true
@@ -526,6 +588,44 @@ func (c *config) validate() error {
 	}
 	if solos > 1 {
 		return fmt.Errorf("only one pool can be solo (%d are marked solo)", solos)
+	}
+	// Shares are all-or-nothing and must total 100. Absent on every pool is the
+	// default, means an even split, and is exactly today's behaviour -- so an
+	// old config with no shares at all is untouched. But a share on SOME pools
+	// and not others is not a division anyone can act on: there is no honest way
+	// to split a whole when only part of it is named. And shares that do not
+	// total 100 are not a split either -- there is no sensible value to invent
+	// for the remainder, so this refuses rather than guessing, the same posture
+	// as every other ambiguous config here. The UI makes both states impossible
+	// by construction (the bar is 100% by construction); a hand-edited file is
+	// on its own, and these are the messages it gets, in the dashboard and the
+	// container log alike.
+	specified := 0
+	var shareSum float64
+	for _, p := range c.Pools {
+		if p.Share == nil {
+			continue
+		}
+		specified++
+		if *p.Share < 0 || *p.Share > 100 {
+			return fmt.Errorf("pool %q has share %s; a share is a percentage from 0 to 100",
+				p.displayName(), shareStr(*p.Share))
+		}
+		shareSum += *p.Share
+	}
+	if specified > 0 {
+		if specified != len(c.Pools) {
+			return fmt.Errorf("%d of %d pools set a share; either every pool sets one or none do",
+				specified, len(c.Pools))
+		}
+		// Shares carry two decimals, so the total is checked at that precision
+		// rather than by exact float equality: 33.33 + 33.33 + 33.34 is a valid
+		// 100 that binary rounding would otherwise reject.
+		if math.Abs(shareSum-100) > 0.005 {
+			// Rounded because the sum carries binary noise: 10.1 + 20.2 + 30.3 is
+			// 60.599999999999994, and nobody typed that.
+			return fmt.Errorf("pool shares total %s%%, not 100%%; they must sum to exactly 100", shareStr(math.Round(shareSum*100)/100))
+		}
 	}
 	seenPort := map[int]bool{}
 	for i, r := range c.Rigs {
@@ -724,14 +824,15 @@ func (c *config) validateRaw() error {
 
 // displayName is how an entry is told apart -- in logs, in the gateway health
 // map, and in the pool names /status joins rigs to pools by. Derived, never
-// stored: the operator's label, the solo entry's role and address, or the
-// address alone, so an entry is never nameless and never needs a sentinel.
+// stored: the operator's label, "solo" for the solo entry, or the address alone,
+// so an entry is never nameless and never needs a sentinel. "solo" is unique
+// because validate allows only one solo entry and reserves the name.
 //
 // Every such site calls this rather than reading Name. Reading Name directly
 // is how unnamed entries once logged blanks and shared one health record.
 func (p poolConfig) displayName() string {
 	if p.Solo {
-		return "solo (" + p.stratumAddr() + ")"
+		return "solo"
 	}
 	if p.Name != "" {
 		return p.Name
@@ -748,4 +849,50 @@ func (c *config) gatewayPoll() time.Duration {
 // interface) and the configured port.
 func (c *config) dashboardAddr() string {
 	return net.JoinHostPort(c.DashboardHost, strconv.Itoa(c.DashboardPort))
+}
+
+// targets is each pool's intended fraction of hashrate-time, in pool order,
+// summing to 1. It is the ONE place the raw shares turn into the numbers the
+// scheduler and the fairness band both consume, so the two can never disagree
+// about what an operator asked for.
+//
+// Absent shares mean an even split -- the historical behaviour, and what every
+// existing config gets. validate has already guaranteed the only two valid
+// states by the time this runs: every pool sets a share and they total 100, or
+// none do. So "any share set" is enough to know all are, and a nil here in the
+// specified case cannot happen; the guard is only so this is honest read in
+// isolation.
+func (c *config) targets() []float64 {
+	n := len(c.Pools)
+	out := make([]float64, n)
+	if n == 0 {
+		return out
+	}
+	specified := false
+	for _, p := range c.Pools {
+		if p.Share != nil {
+			specified = true
+			break
+		}
+	}
+	if !specified {
+		even := 1.0 / float64(n)
+		for i := range out {
+			out[i] = even
+		}
+		return out
+	}
+	for i, p := range c.Pools {
+		if p.Share != nil {
+			out[i] = *p.Share / 100.0
+		}
+	}
+	return out
+}
+
+// shareStr prints a share percentage for an error message: the shortest form that
+// reads back as the same number, so "33.33" and "100" rather than "33.330000" and
+// "100.00". A sum has to be rounded first; see validate.
+func shareStr(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
 }

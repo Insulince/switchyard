@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -304,7 +305,7 @@ func TestSoloEntryHasNoName(t *testing.T) {
 	if err := c.validate(); err != nil {
 		t.Fatalf("unnamed solo entry rejected: %v", err)
 	}
-	if got, want := c.Pools[0].displayName(), "solo (gw-solo:23339)"; got != want {
+	if got, want := c.Pools[0].displayName(), "solo"; got != want {
 		t.Errorf("displayName = %q, want %q", got, want)
 	}
 }
@@ -323,19 +324,28 @@ func TestOnlyOneEntryMayBeSolo(t *testing.T) {
 	}
 }
 
-// No name is taken for switchyard's own purposes: a real pool may be called
-// "Solo", next to the solo entry, and the two stay distinct.
-func TestAPoolMayBeNamedSolo(t *testing.T) {
-	c := config{Pools: []poolConfig{
-		{Name: "Solo", Host: "gw-a", Port: 23336, StatusPort: 7154, Protocol: "sv1"},
-		{Solo: true, Host: "gw-solo", Port: 23339, StatusPort: 7157, Protocol: "sv1"},
-	}}
-	c.applyDefaults()
-	if err := c.validate(); err != nil {
-		t.Fatalf("a pool named Solo was rejected: %v", err)
+// "solo" is switchyard's own label, in any case and with or without a solo
+// gateway configured. Only that literal word is reserved.
+func TestSoloNameIsReserved(t *testing.T) {
+	second := map[string]poolConfig{
+		"beside a solo gateway":  {Solo: true, Host: "gw-solo", Port: 23339, StatusPort: 7157, Protocol: "sv1"},
+		"without a solo gateway": {Name: "other", Host: "gw-b", Port: 23337, StatusPort: 7155, Protocol: "sv1"},
 	}
-	if c.Pools[0].displayName() == c.Pools[1].displayName() {
-		t.Errorf("both entries labelled %q", c.Pools[0].displayName())
+	for desc, other := range second {
+		for name, wantOK := range map[string]bool{
+			"solo": false, "Solo": false, "SOLO": false, "sOlO": false, " solo ": false,
+			"Solo2": true, "s0l0": true, "solo pool": true,
+		} {
+			c := config{Pools: []poolConfig{{Name: name, Host: "gw-a", Port: 23336, StatusPort: 7154, Protocol: "sv1"}, other}}
+			c.applyDefaults()
+			err := c.validate()
+			if wantOK && err != nil {
+				t.Errorf("%s: name %q rejected: %v", desc, name, err)
+			}
+			if !wantOK && (err == nil || !strings.Contains(err.Error(), "reserved")) {
+				t.Errorf("%s: name %q: err = %v, want the reserved-name error", desc, name, err)
+			}
+		}
 	}
 }
 
@@ -551,6 +561,55 @@ func TestResolveRigIdentitiesResolvesSentinels(t *testing.T) {
 	}
 }
 
+// A rig's port is editable, so a kept identity has to follow the rig rather
+// than stay with the number. Two rigs swapping ports must each keep their own
+// secret, and a rig moved to a brand-new port must take its secret with it.
+// Resolving by the CURRENT port would hand each rig the other's identity on a
+// swap, and lose it entirely on a move.
+func TestKeepFollowsARemappedPort(t *testing.T) {
+	a, err := newAuthoritySecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := newAuthoritySecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := config{Rigs: []rigConfig{
+		{Port: 23401, Protocol: "sv2", AuthoritySecret: a},
+		{Port: 23402, Protocol: "sv2", AuthoritySecret: b},
+	}}
+	in := &config{Rigs: []rigConfig{
+		{Port: 23402, Protocol: "sv2", AuthoritySecret: keepSentinel(23401)}, // swapped
+		{Port: 23401, Protocol: "sv2", AuthoritySecret: keepSentinel(23402)}, // swapped
+		{Port: 23409, Protocol: "sv1", AuthoritySecret: keepSentinel(23401)}, // flipped to sv1
+	}}
+	if err := resolveRigIdentities(in, running); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if in.Rigs[0].AuthoritySecret != a || in.Rigs[1].AuthoritySecret != b {
+		t.Error("swapping two rigs' ports swapped their identities too; each must keep its own")
+	}
+	if in.Rigs[2].AuthoritySecret != "" {
+		t.Errorf("an sv1 rig kept a sentinel secret: %q", in.Rigs[2].AuthoritySecret)
+	}
+
+	moved := &config{Rigs: []rigConfig{{Port: 23460, Protocol: "sv2", AuthoritySecret: keepSentinel(23402)}}}
+	if err := resolveRigIdentities(moved, running); err != nil {
+		t.Fatalf("resolve after a move: %v", err)
+	}
+	if moved.Rigs[0].AuthoritySecret != b {
+		t.Error("a rig moved to a new port lost its identity")
+	}
+
+	for _, sec := range []string{keepSentinel(23499), keepPrefix + "x"} {
+		bad := &config{Rigs: []rigConfig{{Port: 23401, Protocol: "sv2", AuthoritySecret: sec}}}
+		if err := resolveRigIdentities(bad, running); err == nil {
+			t.Errorf("keep %q resolved with nothing on file; want an error, not an empty secret", sec)
+		}
+	}
+}
+
 func TestResolveRigIdentitiesKeepWithoutPriorFails(t *testing.T) {
 	in := &config{Rigs: []rigConfig{
 		{Port: 23404, Protocol: "sv2", AuthoritySecret: authSecretKeep},
@@ -574,5 +633,161 @@ func TestStagedSecretsAreConsumedOnce(t *testing.T) {
 	}
 	if _, ok := s.consumeStaged(h); ok {
 		t.Fatal("a staged secret must be consumable only once")
+	}
+}
+
+// sharep makes a *float64 for a share literal in a fixture. Shares are pointers
+// so an explicit 0 is distinguishable from "unset"; the tests need both.
+func sharep(v float64) *float64 { return &v }
+
+// No shares at all is the default, and it means an even split -- exactly what
+// every pre-existing config already has and relies on. targets must reflect
+// that without any share field being present.
+func TestSharesAbsentIsEvenSplit(t *testing.T) {
+	c := config{Pools: []poolConfig{
+		{Name: "a", Host: "127.0.0.1", Port: 23336, StatusPort: 7154, Protocol: "sv1"},
+		{Name: "b", Host: "127.0.0.1", Port: 23337, StatusPort: 7155, Protocol: "sv1"},
+		{Name: "c", Host: "127.0.0.1", Port: 23338, StatusPort: 7156, Protocol: "sv1"},
+	}}
+	c.applyDefaults()
+	if err := c.validate(); err != nil {
+		t.Fatalf("a config with no shares was rejected: %v", err)
+	}
+	got := c.targets()
+	for i, want := range []float64{1.0 / 3, 1.0 / 3, 1.0 / 3} {
+		if got[i] != want {
+			t.Errorf("targets()[%d] = %v, want %v (even split)", i, got[i], want)
+		}
+	}
+}
+
+// Shares are all-or-nothing: a split where only some of the whole is named is
+// not a split anyone can act on, so a config that sets a share on some pools
+// and not others is refused rather than guessed at.
+func TestSharesMustBeAllOrNone(t *testing.T) {
+	c := config{Pools: []poolConfig{
+		{Name: "a", Host: "127.0.0.1", Port: 23336, StatusPort: 7154, Share: sharep(60), Protocol: "sv1"},
+		{Name: "b", Host: "127.0.0.1", Port: 23337, StatusPort: 7155, Protocol: "sv1"},
+	}}
+	c.applyDefaults()
+	err := c.validate()
+	if err == nil || !strings.Contains(err.Error(), "every pool sets one or none") {
+		t.Fatalf("err = %v, want the all-or-nothing error", err)
+	}
+}
+
+// Shares that do not total 100 are not a division of the whole -- and there is
+// no honest value to invent for the remainder, so this refuses with a named
+// error rather than normalising behind the operator's back.
+func TestSharesMustSumTo100(t *testing.T) {
+	c := config{Pools: []poolConfig{
+		{Name: "a", Host: "127.0.0.1", Port: 23336, StatusPort: 7154, Share: sharep(60), Protocol: "sv1"},
+		{Name: "b", Host: "127.0.0.1", Port: 23337, StatusPort: 7155, Share: sharep(30), Protocol: "sv1"},
+	}}
+	c.applyDefaults()
+	err := c.validate()
+	if err == nil || !strings.Contains(err.Error(), "not 100%") {
+		t.Fatalf("err = %v, want the sum-to-100 error", err)
+	}
+}
+
+// A share is a percentage; a value outside 0..100 is a typo, named as such.
+// The total in the error is what the operator would add up by hand, not the
+// binary noise of summing floats: these three sum to 60.599999999999994.
+func TestShareTotalInErrorIsRounded(t *testing.T) {
+	cfg := config{Pools: []poolConfig{
+		{Name: "a", Host: "h", Port: 1, StatusPort: 2, Share: sharep(10.1), Protocol: "sv1"},
+		{Name: "b", Host: "h", Port: 3, StatusPort: 4, Share: sharep(20.2), Protocol: "sv1"},
+		{Name: "c", Host: "h", Port: 5, StatusPort: 6, Share: sharep(30.3), Protocol: "sv1"},
+	}}
+	cfg.applyDefaults()
+	err := cfg.validate()
+	if err == nil {
+		t.Fatal("shares totalling 60.6 were accepted")
+	}
+	if !strings.Contains(err.Error(), "total 60.6%") {
+		t.Errorf("error = %q, want it to report a total of 60.6%%", err)
+	}
+}
+
+func TestShareOutOfRangeIsRejected(t *testing.T) {
+	c := config{Pools: []poolConfig{
+		{Name: "a", Host: "127.0.0.1", Port: 23336, StatusPort: 7154, Share: sharep(140), Protocol: "sv1"},
+		{Name: "b", Host: "127.0.0.1", Port: 23337, StatusPort: 7155, Share: sharep(-40), Protocol: "sv1"},
+	}}
+	c.applyDefaults()
+	err := c.validate()
+	if err == nil || !strings.Contains(err.Error(), "0 to 100") {
+		t.Fatalf("err = %v, want the range error", err)
+	}
+}
+
+// A valid split: every pool sets a share, they total 100, the solo entry is in
+// the division like any other pool, and targets reflects the fractions.
+func TestValidSharesIncludingSolo(t *testing.T) {
+	c := config{Pools: []poolConfig{
+		{Name: "a", Host: "127.0.0.1", Port: 23336, StatusPort: 7154, Share: sharep(50), Protocol: "sv1"},
+		{Name: "b", Host: "127.0.0.1", Port: 23337, StatusPort: 7155, Share: sharep(30), Protocol: "sv1"},
+		{Solo: true, Host: "gw-solo", Port: 23339, StatusPort: 7157, Share: sharep(20), Protocol: "sv1"},
+	}}
+	c.applyDefaults()
+	if err := c.validate(); err != nil {
+		t.Fatalf("a valid 50/30/20 split with a solo slot was rejected: %v", err)
+	}
+	got := c.targets()
+	for i, want := range []float64{0.50, 0.30, 0.20} {
+		if got[i] != want {
+			t.Errorf("targets()[%d] = %v, want %v", i, got[i], want)
+		}
+	}
+}
+
+// An explicit 0 means "this pool, deliberately, gets nothing" and must survive
+// the disk round trip as a 0 -- not vanish under omitempty and read back as
+// "unset". This is the whole reason Share is a pointer, so the regression is
+// worth pinning.
+func TestExplicitZeroShareSurvivesRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	c := config{Pools: []poolConfig{
+		{Name: "a", Host: "127.0.0.1", Port: 23336, StatusPort: 7154, Share: sharep(100), Protocol: "sv1"},
+		{Name: "b", Host: "127.0.0.1", Port: 23337, StatusPort: 7155, Share: sharep(0), Protocol: "sv1"},
+	}}
+	c.applyDefaults()
+	if err := c.validate(); err != nil {
+		t.Fatalf("100/0 split rejected: %v", err)
+	}
+	if err := saveConfig(path, c); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got.Pools[1].Share == nil {
+		t.Fatal("the explicit 0 share was dropped on save; it read back as unset")
+	}
+	if *got.Pools[1].Share != 0 {
+		t.Errorf("share = %v after round trip, want 0", *got.Pools[1].Share)
+	}
+}
+
+// Two-decimal shares that total 100 are valid -- the proportional editor lands
+// on them routinely (adjust one pool of four and the rest take a third of the
+// remainder each), and binary rounding of the sum must not reject an honest 100.
+func TestSharesTwoDecimalsSumTo100(t *testing.T) {
+	c := config{Pools: []poolConfig{
+		{Name: "a", Host: "127.0.0.1", Port: 23336, StatusPort: 7154, Share: sharep(33.33), Protocol: "sv1"},
+		{Name: "b", Host: "127.0.0.1", Port: 23337, StatusPort: 7155, Share: sharep(33.33), Protocol: "sv1"},
+		{Name: "c", Host: "127.0.0.1", Port: 23338, StatusPort: 7156, Share: sharep(33.34), Protocol: "sv1"},
+	}}
+	c.applyDefaults()
+	if err := c.validate(); err != nil {
+		t.Fatalf("a 33.33/33.33/33.34 split was rejected: %v", err)
+	}
+	got := c.targets()
+	for i, want := range []float64{0.3333, 0.3333, 0.3334} {
+		if math.Abs(got[i]-want) > 1e-9 {
+			t.Errorf("targets()[%d] = %v, want %v", i, got[i], want)
+		}
 	}
 }

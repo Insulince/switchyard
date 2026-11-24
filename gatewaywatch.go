@@ -47,9 +47,14 @@ type gatewayHealth struct {
 	// rotation onto that pool was a rotation onto solo, the pool-side
 	// accepted counter froze, and the card stayed green.
 	Unpooled bool `json:"unpooled,omitempty"`
-	// NetworkDifficulty is the current block's difficulty, from the job
-	// section of the page. DATUM prints it pooled or not; the solo card turns
-	// it into odds of finding a block.
+	// NetworkDifficulty is the dimensionless network difficulty, derived from
+	// the "Block Difficulty" field on the gateway page. DATUM does NOT print the
+	// difficulty there: it prints the expected WORK per block -- difficulty x
+	// 2^32, the mean number of hashes to find one -- human-formatted with an SI
+	// suffix, e.g. "27.2E" (2.72e19 hashes) on a chain whose difficulty is
+	// ~6.33e9. parseNetworkDifficulty scales the suffix back in and divides by
+	// 2^32 to recover the difficulty stored here. The solo card turns it into
+	// odds of finding a block.
 	NetworkDifficulty float64 `json:"networkDifficulty,omitempty"`
 	// SoloMismatch is an entry marked solo whose gateway names a pool. Its
 	// work is going to that pool, so the dashboard's "solo" would be wrong.
@@ -218,7 +223,14 @@ func (co *coordinator) watchGateways(ctx context.Context) {
 var (
 	poolAccRE = regexp.MustCompile(`Pool Shares Accepted:\s*(\d+)`)
 	poolRejRE = regexp.MustCompile(`Pool Shares Rejected:\s*(\d+)`)
-	netDiffRE = regexp.MustCompile(`Block Difficulty:\s*([0-9]+(?:\.[0-9]+)?)`)
+	// The number AND its optional SI magnitude suffix: DATUM prints this field
+	// human-formatted, e.g. "27.2E". Capturing only the digits silently dropped
+	// the suffix and read 27.2E (2.72e19) as 27.2 -- a block every fraction of a
+	// second and a "1 in 1 chance per day" on the solo card. See
+	// parseNetworkDifficulty. The \b is what makes a suffix a suffix: tags are
+	// stripped before this runs, so a value with no suffix is followed by the next
+	// field's label, and a "T" that starts a word must not read as tera.
+	netDiffRE = regexp.MustCompile(`Block Difficulty:\s*([0-9]+(?:\.[0-9]+)?)(?:\s*([kKMGTPEZY])\b)?`)
 	heightRE  = regexp.MustCompile(`Block Height:\s*(\d+)`)
 	// DATUM wraps the hash's leading zeros in their own element to dim them,
 	// so once tags are stripped the hash arrives split by whitespace
@@ -252,6 +264,47 @@ func hiddenPrevhash(display string) string {
 	return hex.EncodeToString(out)
 }
 
+// siScale maps DATUM's human-readable magnitude suffix to its multiplier. DATUM
+// formats large numbers on its status page this way; k is the SI 1e3 whether
+// written k or K.
+var siScale = map[string]float64{
+	"":  1,
+	"k": 1e3, "K": 1e3,
+	"M": 1e6,
+	"G": 1e9,
+	"T": 1e12,
+	"P": 1e15,
+	"E": 1e18,
+	"Z": 1e21,
+	"Y": 1e24,
+}
+
+// twoPow32 is difficulty 1 expressed in hashes: a difficulty-1 block takes 2^32
+// expected hashes. It is the bridge between the WORK DATUM prints and the
+// difficulty the rest of switchyard reasons in.
+const twoPow32 = 4294967296.0
+
+// parseNetworkDifficulty reads DATUM's "Block Difficulty" field and returns the
+// dimensionless network difficulty, or 0 if the field is absent or unparseable.
+//
+// DATUM prints the expected WORK per block there, not the difficulty: the mean
+// number of hashes to find a block, which is difficulty x 2^32, SI-formatted
+// like "27.2E". So the suffix is scaled back in and the result -- hashes -- is
+// divided by 2^32 to recover the difficulty. The solo card multiplies by 2^32
+// again to get a hash count; the units meet in the middle, honestly, with the
+// gateway's work on one side and switchyard's difficulty on the other.
+func parseNetworkDifficulty(text string) float64 {
+	m := netDiffRE.FindStringSubmatch(text)
+	if len(m) < 3 {
+		return 0
+	}
+	work, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		return 0
+	}
+	return work * siScale[m[2]] / twoPow32
+}
+
 // inspectGatewayFull is inspectGateway plus the share counters. Split so the
 // editor's one-shot "Inspect" button and this poller cannot drift apart.
 func inspectGatewayFull(ctx context.Context, rawURL string) (*gatewayHealth, error) {
@@ -265,7 +318,7 @@ func inspectGatewayFull(ctx context.Context, rawURL string) (*gatewayHealth, err
 		Tag:               info.Tag,
 		PoolAccepted:      firstUint(poolAccRE, text),
 		PoolRejected:      firstUint(poolRejRE, text),
-		NetworkDifficulty: firstFloat(netDiffRE, text),
+		NetworkDifficulty: parseNetworkDifficulty(text),
 		BlockHeight:       firstUint(heightRE, text),
 		Checked:           time.Now(),
 	}
@@ -280,15 +333,6 @@ func firstUint(re *regexp.Regexp, text string) uint64 {
 	if m := re.FindStringSubmatch(text); len(m) > 1 {
 		if n, err := strconv.ParseUint(m[1], 10, 64); err == nil {
 			return n
-		}
-	}
-	return 0
-}
-
-func firstFloat(re *regexp.Regexp, text string) float64 {
-	if m := re.FindStringSubmatch(text); len(m) > 1 {
-		if f, err := strconv.ParseFloat(m[1], 64); err == nil {
-			return f
 		}
 	}
 	return 0

@@ -408,9 +408,10 @@ func (s *server) mux() http.Handler {
 			}
 			// A browser has no business holding switchyard's own SV2 secrets, so
 			// this is the one place the GET is a projection rather than the file
-			// verbatim: each sv2 rig's authoritySecret is replaced by the __keep__
-			// sentinel (the editor sends it back unchanged to preserve the secret,
-			// never seeing it), and the PUBLIC half -- the part an operator pins on
+			// verbatim: each sv2 rig's authoritySecret is replaced by a
+			// __keep__:<port> sentinel naming the port it is on file under (the
+			// editor sends it back unchanged to preserve the secret, never seeing
+			// it, and it still resolves after the rig's port is edited), and the PUBLIC half -- the part an operator pins on
 			// a miner -- is handed over separately. A pool's authorityKey is
 			// already public, so it is returned as-is.
 			redacted := cfg
@@ -423,7 +424,7 @@ func (s *server) mux() http.Handler {
 				if priv, err := redacted.Rigs[i].authorityPriv(); err == nil {
 					rigPub[strconv.Itoa(redacted.Rigs[i].Port)] = authorityKeyEncode(priv.PubKey())
 				}
-				redacted.Rigs[i].AuthoritySecret = authSecretKeep
+				redacted.Rigs[i].AuthoritySecret = keepSentinel(redacted.Rigs[i].Port)
 			}
 			writeJSON(w, http.StatusOK, map[string]any{
 				"config":          redacted,

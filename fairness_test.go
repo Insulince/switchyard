@@ -19,7 +19,7 @@ func TestSigmaTightensAsChunksAccumulate(t *testing.T) {
 	for _, chunks := range []int{10, 100, 1000, 10000} {
 		work := uint64(chunk) * uint64(chunks)
 		chunkSq := chunk * chunk * float64(chunks)
-		got := sigmaPct(chunkSq, work, pools)
+		got := sigmaPct(chunkSq, work, 1.0/float64(pools))
 
 		if got <= 0 {
 			t.Fatalf("chunks=%d: sigma = %v, want positive", chunks, got)
@@ -54,11 +54,11 @@ func TestShareUnitOverstatesPrecisionAgainstDwellUnit(t *testing.T) {
 		perDwell  = 3456.0 * 2048 / rotations
 		total     = uint64(perDwell * rotations)
 	)
-	byDwell := sigmaPct(perDwell*perDwell*rotations, total, pools)
+	byDwell := sigmaPct(perDwell*perDwell*rotations, total, 1.0/float64(pools))
 
 	// The old model: ~3456 shares at difficulty 2048.
 	const shares = 3456.0
-	byShare := sigmaPct(2048*2048*shares, total, pools)
+	byShare := sigmaPct(2048*2048*shares, total, 1.0/float64(pools))
 
 	if !(byShare < byDwell) {
 		t.Fatalf("share-unit band %.3f is not tighter than dwell-unit %.3f", byShare, byDwell)
@@ -77,8 +77,8 @@ func TestSigmaUsesSquaredChunkWorkNotChunkCount(t *testing.T) {
 	// Same total work, delivered as few big dwells versus many small ones.
 	const total = 4096 * 1000
 
-	few := sigmaPct(4096.0*4096.0*1000, total, 3)  // 1000 chunks of 4096
-	many := sigmaPct(1024.0*1024.0*4000, total, 3) // 4000 chunks of 1024
+	few := sigmaPct(4096.0*4096.0*1000, total, 1.0/3.0)  // 1000 chunks of 4096
+	many := sigmaPct(1024.0*1024.0*4000, total, 1.0/3.0) // 4000 chunks of 1024
 
 	if !(many < few) {
 		t.Fatalf("many small chunks gave sigma %.4f, few large gave %.4f; "+
@@ -103,7 +103,7 @@ func TestSigmaDegenerateInputs(t *testing.T) {
 		{"single pool", 1 << 20, 4096, 1},
 		{"negative variance", -1, 4096, 3},
 	} {
-		if got := sigmaPct(c.workSq, c.work, c.pools); got != 0 {
+		if got := sigmaPct(c.workSq, c.work, 1.0/float64(c.pools)); got != 0 {
 			t.Errorf("%s: sigma = %v, want 0", c.name, got)
 		}
 	}
@@ -135,6 +135,60 @@ func TestDwellCeilingMustExceedFloor(t *testing.T) {
 		if (err != nil) != c.wantErr {
 			t.Errorf("%s: err = %v, wantErr %v", c.name, err, c.wantErr)
 		}
+	}
+}
+
+// The band has no warm-up: it appears with the first share, before any rotation
+// and before every pool has had work. A pool with nothing to spread around, set
+// to 0%, never gets a band of its own.
+func TestBandAppearsWithFirstShare(t *testing.T) {
+	cfg := zeroShareConfig(t, []float64{60, 40, 0}, 1)
+	co := newCoordinator(cfg)
+	if doc := co.status(); doc.Banded {
+		t.Error("banded with no work at all")
+	}
+
+	co.ups[0][0].(*upstream).acceptedWork = 1000
+	doc := co.status()
+	if !doc.Banded {
+		t.Fatalf("not banded after the first share (rotations = %d)", doc.Rotations)
+	}
+	if doc.Pools[0].SigmaPct <= 0 || doc.Pools[1].SigmaPct <= 0 {
+		t.Errorf("sigmas = %v, %v; want both pools with a target banded", doc.Pools[0].SigmaPct, doc.Pools[1].SigmaPct)
+	}
+	if doc.Pools[2].SigmaPct != 0 {
+		t.Errorf("0%% pool sigma = %v, want 0", doc.Pools[2].SigmaPct)
+	}
+
+	// All the work going to one pool leaves nothing to compare.
+	solo := newCoordinator(zeroShareConfig(t, []float64{100, 0}, 1))
+	solo.ups[0][0].(*upstream).acceptedWork = 1000
+	if solo.status().Banded {
+		t.Error("banded on a 100/0 split")
+	}
+}
+
+// A statistics reset throws away the work the band is computed from, so the
+// band is young again even though the rotation count carries on.
+func TestBandRotationsRestartOnReset(t *testing.T) {
+	co := newCoordinator(testConfig())
+	co.mu.Lock()
+	co.rotations = 5
+	co.mu.Unlock()
+	if doc := co.status(); doc.BandRotations != 5 {
+		t.Errorf("before reset: BandRotations = %d, want 5", doc.BandRotations)
+	}
+
+	co.resetStats()
+	if doc := co.status(); doc.BandRotations != 0 || doc.Rotations != 5 {
+		t.Errorf("after reset: BandRotations = %d, Rotations = %d; want 0, 5", doc.BandRotations, doc.Rotations)
+	}
+
+	co.mu.Lock()
+	co.rotations++
+	co.mu.Unlock()
+	if doc := co.status(); doc.BandRotations != 1 {
+		t.Errorf("one rotation after reset: BandRotations = %d, want 1", doc.BandRotations)
 	}
 }
 
