@@ -1,7 +1,7 @@
 # switchyard
 
-Split your hashrate across as many DATUM pools as you like, on the network's
-own clock.
+Split your hashrate across as many DATUM pools as you like, in whatever ratio
+you like, on the network's own clock, including a solo gateway.
 
 Fixed tracks, rolling stock, routed between them on a schedule.
 
@@ -12,21 +12,22 @@ Fixed tracks, rolling stock, routed between them on a schedule.
 
 ![The switchyard dashboard](docs/dashboard.png)
 
-*Two rigs, three pools, 280 rotations in. Each pool received 0.33, 0.35 and
-0.34 TH/s against an even split of 0.34 — inside a third of a standard
-deviation, which is the evenness the bands exist to prove.*
+*Four rigs across a solo gateway and three pools, on a 40/35/15/10 split, 57
+rotations in. Against targets of 6.95, 6.08, 2.61 and 1.74 TH/s they received
+7.11, 5.90, 2.41 and 1.95, every one within a third of a standard deviation.*
 
 The pools above are real, run by people who did the work of standing up a
 DATUM-compatible pool. Named here for attribution, but note that switchyard
 neither knows nor cares which pools you use.
 
 - **RIPTIDE** — <https://tides.maveth.ca>
-- **RATUM Prime** — <https://pool.iohzrd.tech>
+- **OmegaPool** — <https://pool.iohzrd.tech>
 - **Lazarus Pool** — <https://pool.awokenlazarus.xyz>
 
 **[The problem](#the-problem)** · **[How it works](#how-it-works)** ·
 **[What it costs](#what-this-costs-you)** · **[What you need](#what-you-need)** ·
 **[Gateway requirement](#one-requirement-on-your-gateways)** ·
+**[Solo gateway](#solo-gateway)** · **[Custom split](#custom-split)** ·
 **[Running it](#running-it)** · **[Configuring it](#configuring-it)** ·
 **[Behaviour worth knowing](#behaviour-worth-knowing)** ·
 **[Rented hashrate](#rented-hashrate)** ·
@@ -54,10 +55,10 @@ switchyard never talks to a pool. It sits between your rigs and your local
 DATUM gateways, each holding its own permanent session with its Prime.
 Rotating a rig disturbs no pool relationship.
 
-Any number of rigs, any number of pools. With fewer rigs than pools, `P − R`
-pools are dark at any moment — the arithmetic minimum. With more, pools carry
-multiple rigs rather than one. Either way every rig tours every pool once per cycle,
-so every pool's long-run share is equal.
+Any number of rigs, any number of pools. A balance scheduler steers each pool's
+long-run share of work toward its target — an even split by default, or an
+uneven one you set per pool. At any given moment some pools may carry several
+rigs while others are dark, whatever the counts; it is the long run that holds.
 
 ---
 
@@ -67,17 +68,29 @@ so every pool's long-run share is equal.
 — each stays welded to its pool for life (see [What you need](#what-you-need)).
 Rigs are the only thing that moves.
 
-**The schedule.** Rig `i` at step `t` is on pool `(base[i] + t) mod P`. Each
-rig keeps a fixed offset, so rigs never converge; every rig visits every pool
-exactly once per `P` steps. The opening arrangement is randomised but balanced,
-so no pool is systematically favoured.
+**The schedule.** A *balance scheduler* places the rigs on each rotation. For each
+rig it tracks how much of that rig's time each pool has had, and sends the rig to
+the pool furthest behind its target share of that time, with a small preference
+for pools no other rig is on when the choice is close. A rig holding the split
+with its own time holds it with its hashrate too, whatever size it is. The opening
+arrangement is randomised but balanced, so no pool is systematically favoured.
+Over many rotations each pool converges to its target regardless of block-timing
+variance (see [Custom split](#custom-split) for setting those targets).
+
+A rig cannot be divided, so with one rig doing most of the hashing the shares
+swing widely at first and take longer to smooth out, typically about a day of
+blocks. One real fleet, a 15 TH/s rig and three under 1 TH/s on a 40/35/15/10
+split, had its worst pool 1.3 points off target after 58 rotations.
 
 **The clock is new blocks**, detected from the `prevhash` in `mining.notify` on
 the upstream sessions. This costs nothing — every gateway already pushes a
 fresh job on every block, so there is no `blocknotify` wiring and no node
 restart. Block intervals are exponential, so slots vary widely; that averages
-out. `minDwellSeconds` only stops a burst of fast blocks from spending more
-time reconnecting than hashing.
+out. Two limits shape the rest. A block that arrives inside `minDwellSeconds`
+gets no rotation of its own, so a burst of fast blocks doesn't spend more time
+reconnecting than hashing, and if no block arrives within `maxDwellSeconds`
+switchyard rotates anyway. Over one eight-hour run, 50 of 59 rotations came from
+blocks and 9 from the ceiling, and 8 of 58 blocks fell inside the floor.
 
 **The upstream mesh is always on.** Every rig holds a session to *every*
 gateway permanently — a full `R × P` mesh — regardless of assignment. That is
@@ -86,13 +99,20 @@ to the TCP connection and **not** keyed by worker name. A gateway dialled only
 while a rig points at it would reset difficulty to the floor and re-climb on
 every rotation. With the mesh held open, only the rig-facing connection cycles.
 
+The mesh shortens the re-climb rather than removing it. DATUM lowers a session's
+difficulty when no shares are coming in, so a session left idle for several
+minutes has drifted down by the time a rig returns. A large rig then climbs back
+in about half a minute. Each share is counted at the difficulty it was sent at,
+so the extra low-difficulty shares don't skew the split.
+
 **The rig still has to reconnect.** `extranonce1` is assigned per-session at
 `mining.subscribe`, folded into the coinbase and therefore the merkle root. A
 share mined under one gateway's extranonce1 is a *different share* and cannot
 be re-addressed — a proxy cannot remap it, the hash would be wrong. So a rig
 session is bound to one gateway for its lifetime, and rotation means ending it.
 `mining.set_extranonce` would avoid the drop but depends on firmware support
-that varies.
+that varies. Every rotation reconnects every rig, including one the scheduler
+sends back to the pool it was already on.
 
 ---
 
@@ -114,8 +134,9 @@ three-minute slots. The gap is fixed; the slot is not. So the cost is set less
 by your hardware than by how often you rotate — and rotation fires on blocks,
 which you do not control. `minDwellSeconds` is the one lever you have.
 
-Reconnect time varies by firmware — two seconds for some miners, ten for
-others, and you cannot know yours from a datasheet. So switchyard measures it:
+Reconnect time varies by firmware — well under a second for some miners, ten
+seconds for others, and you cannot know yours from a datasheet. So switchyard
+measures it:
 the **Rotation cost** card reports observed average and worst reconnect, and
 the share of rig-time lost to them. Only gaps switchyard itself caused are
 counted; gaps over a minute are excluded rather than averaged in.
@@ -123,7 +144,7 @@ counted; gaps over a minute are excluded rather than averaged in.
 **A second, smaller cost: your reject rate will rise slightly.** A rotation
 changes the job and `extranonce1` under a running ASIC, so work already in the
 pipeline is stale by the time it is submitted. In practice this is roughly one
-share every couple of dozen rotations — enough to move a reject rate from
+share per rig every couple of dozen rotations — enough to move a reject rate from
 around 0.1% to a few tenths of a percent. Worth knowing only so the change
 doesn't look like a fault.
 
@@ -293,11 +314,14 @@ Run a node.
 
 ---
 
-## Solo slot
+## Solo gateway
 
 One gateway in the rotation can be a **solo** one: a DATUM gateway configured
-with no pool. It takes its turn like any pool. While a rig is on it, that rig
-is mining solo from your own node, and a block it finds is yours whole.
+with no pool. The scheduler treats it like any pool. While a rig is on it, that
+rig is mining solo from your own node, and a block it finds is yours whole.
+
+Time on solo pays nothing until you find a block. Odds aside, that is the trade:
+a pool pays you steadily for the same work, and solo pays all at once or never.
 
 The gateway's own config needs three things a pooled one does not:
 
@@ -310,19 +334,87 @@ The gateway's own config needs three things a pooled one does not:
 `mining.pool_address` is where a found block pays, so set it to your own
 address. Give it its own coinbase tag, as with any gateway.
 
-Add it with **Add solo gateway** in CONFIGURE, or in `config.json`:
+Add it with **Add solo gateway** in **Configure**, or in `config.json`:
 
     { "solo": true, "host": "gw-solo", "port": 23339, "statusPort": 7157 }
 
-It has no name, because there is no pool to name. The dashboard draws it as
-**Solo → network** and shows your odds of a block at the hashrate it has
-averaged, using the network difficulty from the gateway's own page.
+It has no name, because there is no pool to name. The dashboard calls it
+**solo**, and in place of a pool card it draws **Network** with your odds of a
+block at the hashrate it has averaged, using the network difficulty from the
+gateway's own page.
 
-**One solo slot is supported.** Every slot gets an even share of time;
-weighting that is not available yet. If this solo gateway turns out to be
-pointed at a pool, or conversely if a pooled gateway turns out to be mining
-solo, the corresponding cards simply say so with a warning, and mining continues
-anyway as configured, uninterrupted.
+**One solo gateway is supported**, and it takes a share of the rotation like any
+other pool. By default every pool — solo included — gets an equal share; a
+[custom split](#custom-split) lets you weight them, which is most useful right
+here, since how much hashrate to spend on solo is a matter of taste rather than
+economics. If this solo gateway turns out to be pointed at a pool,
+or conversely if a pooled gateway turns out to be mining solo, the corresponding
+cards simply say so with a warning, and mining continues anyway as configured,
+uninterrupted.
+
+---
+
+## Custom split
+
+By default the rotation is **even**: every pool, and the solo gateway if you have
+one, gets the same share of your hashrate over time. That is the right default
+for pool-vs-pool, where an even split is the economically neutral choice.
+
+When you want an uneven split — most often to set how much hashrate rides on
+solo against your risk appetite — the **Configure** window has a split editor,
+always shown: one bar that is always 100% by construction, where you drag a
+handle or type a percent for each pool and lock any you want to hold fixed.
+Adjusting one pool rescales the other **unlocked** pools in place, keeping their
+ratio to each other — so you can shift one share without disturbing the balance
+among the rest, and a lock lets you pin the pools you want held while you do.
+Shares carry two decimals and must total 100; the editor guarantees that, so you
+never see an invalid state.
+
+![The hashrate-split editor: the solo gateway weighted to 40%, with RIPTIDE at 25%, omegapool.tech at 20% and Lazarus at 15%](docs/hashrate-splitting.png)
+
+Above, solo is weighted to 40% and the three pools split the rest — the most
+common reason to reach for an uneven split, since how much hashrate to gamble on
+solo is a matter of taste. Each pool has a drag handle on the bar, a lock to
+hold it fixed while you move the others, and a box to type an exact percent;
+**Equalize** resets whatever is unlocked to an even share.
+
+Each gateway card in the Flow diagram shows its configured share at its top
+right, so you can see the split you asked for without opening **Configure**;
+clicking the percentage opens it.
+
+A pool set to 0% gets no rigs at all, not even as a fallback. If every gateway
+with a share above 0% is down, rigs wait for one to return rather than mining on
+the 0% pool.
+
+The shares are stored per pool in `config.json` as a `share` percentage carried
+to two decimals. They are **all-or-nothing**: either every pool sets a `share` and
+they sum to 100, or none do and the split is even. A hand-edited file that sets
+some and not others, or whose shares do not total 100, is refused at startup with
+a named error rather than guessed at — the same posture as every other ambiguous
+setting here. **Configure** always writes the split out, even an even one, so if
+you add a pool by hand to a file it has saved, give that pool a `share` too.
+
+### Checking the split is holding
+
+The dashboard's **Share of work vs target** section answers two questions side by
+side, and the **Chart** button shows either one alone:
+
+- **Overall** puts every pool on one fixed scale, from zero to your total
+  hashrate, so you can see where the work is going and compare pools.
+- **On target** zooms each pool to its own range, labelled in standard deviations
+  (σ). Each bar grows from the target, so its length is the miss. A σ is worth a
+  different rate on every row, so lengths cannot be compared between pools.
+
+The green, amber and red zones show how far a pool could drift if each dwell
+landed on a pool at random, weighted by its target. The scheduler does better than
+random, because it corrects each overshoot on later rotations, so a healthy pool
+sits well inside the green and keeps moving deeper in. On the eight-hour run above,
+±1σ reached 6.55 points while the worst miss was 1.3.
+
+So falling outside the band is real evidence of a problem, but sitting inside it
+is not a measure of precision. For that, read the figures beside each bar. Very
+small targets are the exception early on: one dwell can overshoot them enough to
+read red for a while.
 
 ---
 
@@ -347,8 +439,8 @@ services:
 
 Two things catch people:
 
-- **Publish a port per rig.** Switchyard assigns from 23401 upwards; an
-  unpublished port is a rig that cannot connect.
+- **Publish a port per rig.** Switchyard suggests ports from 23401 upwards and
+  you can change them; an unpublished port is a rig that cannot connect.
 - **`127.0.0.1` inside a container means the container.** If your gateways are
   containers, share a network and use their names as the pool `host`. If they
   run on the host, use the host's LAN address.
@@ -451,17 +543,22 @@ typo fails loudly instead of being ignored.
 | Field | Default | What it is |
 |---|---|---|
 | `statusListen` | `:7160` | Dashboard address. See the security note below before exposing it. |
-| `pools[].name` | — | A label for the dashboard. |
+| `pools[].name` | — | A label for the dashboard. **Configure** reads it from the gateway's coinbase tag. Not allowed on a solo entry. |
 | `pools[].host` | — | The gateway's address — container name, hostname or IP. |
 | `pools[].port` | — | The gateway's **stratum** port (DATUM default `23334`). |
 | `pools[].statusPort` | — | The gateway's **status page** port (`7152` in DATUM's example config; the default is `0`, disabled, so make sure it is set). Required — it is how switchyard shows what the pool actually accepted. |
-| `rigs[].listen` | — | This rig's port. Assigned from 23401 up. |
+| `pools[].solo` | `false` | Marks the [solo gateway](#solo-gateway). One at most. |
+| `pools[].share` | — | This pool's target percentage, 0 to 100. Set on every pool or none; see [Custom split](#custom-split). |
+| `rigs[].listen` | — | This rig's port. **Configure** suggests the next free one from 23401 up. |
 | `minDwellSeconds` | `60` | Floor on a rotation slot, so fast blocks don't spend more time reconnecting than hashing. |
-| `maxDwellSeconds` | `900` | Ceiling, so a slow block doesn't strand a pool. |
+| `maxDwellSeconds` | `900` | Ceiling: if no block has arrived by then, rotate anyway. |
 | `pollSeconds` | `2` | Dashboard refresh. |
 | `gatewayPollSeconds` | `30` | How often gateway status pages are read. While a dashboard has the **shares** flow mode open, they are also read four times a second, for as long as it stays open. |
 | `dialTimeoutSeconds` | `10` | Upstream connect timeout. |
 | `versionRollingMask` | `""` (off) | Leave empty unless **every** rig uses version rolling — see below. |
+
+Pools and rigs are drawn in the order they appear in the file. To change it, drag
+a card's handle in **Configure**, or focus the handle and use the arrow keys.
 
 ### Where it lives
 
@@ -495,10 +592,20 @@ defaulting to `config.json` in the working directory.
   not a miner.
 - **A dead gateway does not idle a rig.** If the scheduled pool isn't ready the
   rig binds to any ready gateway and logs it. Earning on the wrong pool for one
-  slot beats not earning.
+  slot beats not earning. The exception is a pool set to 0%, which never takes a
+  rig, not even as a fallback.
+- **An outage is not repaid.** The scheduler credits each dwell to the pool the rig
+  was scheduled on, whether or not it got there. A pool that was down, or a rig
+  that was off, does not get extra time afterwards. The share chart shows any
+  shortfall.
+- **The balance lives in memory.** A restart or a save from **Configure** starts it
+  over. **Reset stats** clears the figures on the dashboard but leaves the
+  scheduler's balance alone.
 - **The dark slot is real.** Pools that flag idle workers on share submission
   will see a gap on their dashboard; connection liveness doesn't help, because
-  the discriminator is shares.
+  the discriminator is shares. The smaller a pool's share, the longer those gaps:
+  a 10% pool in a four-rig fleet had no rig on 58% of rotations in one real run,
+  for up to 33 minutes at a stretch.
 
 ---
 
@@ -523,7 +630,7 @@ other. Before you do, know these things:
   the gateway pays the address in *its* config, so who the renter claims to be
   cannot redirect the payout. Do check your pool dashboards for that label
   rather than your own, so you are not alarmed when it appears.
-- **Rotation costs the renter's machines a reconnect too.** Every block, the
+- **Rotation costs the renter's machines a reconnect too.** Every rotation, the
   whole fleet is dropped and reconnects. Firmware you have never seen decides
   how long that takes; the **Rotation cost** card measures it, and it is a
   larger fraction of a short rental than of a long one. Raise
@@ -565,10 +672,10 @@ slice of shares elsewhere.
 
 - **It forwards your identity rather than rewriting it.** Configure your miner
   exactly as you would to reach the gateway directly. A rig entry needs only a
-  port — no name field, no payout address. Where an override is set for an odd
-  pool, the dashboard shows both the name your miner sent and the name that
-  went upstream. A substitution nobody can see is indistinguishable from one
-  nobody agreed to.
+  port — no name field, no payout address, and nowhere to set an override. On a
+  port with several miners, where one name goes upstream for all of them, the
+  dashboard shows both the name each miner sent and the name that went upstream.
+  A substitution nobody can see is indistinguishable from one nobody agreed to.
 - **Every outbound connection is listed.** The dashboard's *Outbound
   connections* panel shows every socket switchyard holds to another machine.
   The complete set should be your gateways and nothing else. No telemetry, no
@@ -651,16 +758,19 @@ it arrives. Classic pool-hopping targets **proportional** schemes, where early
 shares in a round are worth more than late ones; that asymmetry is what makes
 hopping profitable, and TIDES has none of it.
 
-**The scheduling is deliberately unpredictable and even.** Rotations fire on
-blocks nobody controls, and each rig visits every pool once per cycle. The
-fairness band exists to *prove* that evenness, not to help you deviate from it.
-A tool built for hopping would want the opposite: control over timing, and a
-way to bias the split.
+**The scheduling is deliberately unpredictable.** Rotations fire on blocks
+nobody controls, so you cannot time which pool a rig is on. The split across
+pools is a fixed ratio set in advance — even by default — and the fairness band
+exists to *flag* a pool that is not getting the share it was promised, not to help
+you deviate from it. A tool built for hopping would want the opposite: control over
+*timing*, so it could pile onto a pool early in its round and leave before the
+end.
 
-Weighting pools unevenly is a legitimate thing to want and switchyard doesn't
-do it yet. It would not open a hopping vector either — the inputs would still
-be the chain and a fixed ratio you chose, but this is not in active development
-at this time.
+Weighting pools unevenly is a legitimate thing to want, and switchyard does it
+(see [Custom split](#custom-split)) — but it is not that lever. The inputs
+are still only the chain and a fixed ratio you chose ahead of time; nothing
+reacts to where a pool is in its round, which is the one thing hopping needs.
+Under TIDES there is nothing to hop anyway, for the reason above.
 
 ---
 
@@ -679,8 +789,9 @@ startup if it no longer understands your file.
 
 ## Contributing
 
-Issues and pull requests welcome. CI runs `gofmt`, `go vet` and
-`go test -race`. There is a [justfile](justfile) with the same checks:
+Issues and pull requests welcome. CI runs `gofmt`, `go vet`, `go test -race` and a
+syntax check of the embedded dashboard. There is a [justfile](justfile) with the
+same checks:
 
 ```
 just            # list every recipe

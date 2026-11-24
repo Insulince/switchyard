@@ -1,8 +1,9 @@
 # switchyard
 
 A stratum proxy that rotates mining rigs across DATUM gateways so every pool
-gets an even share of work. Single Go binary, no third-party dependencies, with
-the dashboard embedded via `go:embed`.
+gets its target share of work -- an even split by default, or a custom per-pool
+split (including the solo gateway). Single Go binary, no third-party
+dependencies, with the dashboard embedded via `go:embed`.
 
 ## Before you finish any change
 
