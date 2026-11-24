@@ -8,7 +8,7 @@
 
   "pools": [
     { "name": "RIPTIDE",      "host": "127.0.0.1", "port": 23336, "statusPort": 7154 },
-    { "name": "RATUM Prime",  "host": "127.0.0.1", "port": 23337, "statusPort": 7155 },
+    { "name": "OmegaPool",    "host": "127.0.0.1", "port": 23337, "statusPort": 7155 },
     { "name": "Lazarus Pool", "host": "127.0.0.1", "port": 23338, "statusPort": 7156 }
   ],
 

@@ -916,7 +916,7 @@ type upstreamStats struct {
 // denominator is the WHOLE elapsed time, not the time this rig spent on this
 // pool -- a pool carrying a 0.5 TH/s rig for a third of the time really did
 // receive 0.17 TH/s on average, and that average is the thing being compared
-// against an even split.
+// against the pool's target.
 func thsFromWork(work uint64, elapsed time.Duration) float64 {
 	if elapsed <= 0 {
 		return 0

@@ -371,7 +371,10 @@ func TestSaveRefusesAnUnbindableDashboardAddress(t *testing.T) {
 
 // A gateway configured with no pool, as DATUM prints it (datum_api.c):
 // "Non-Pooled Mode" and a pool host of "N/A". The job section, with the
-// network difficulty, is printed either way.
+// network difficulty, is printed either way. "Block Difficulty" is the expected
+// WORK per block (difficulty x 2^32), SI-formatted -- here 27.2E = 2.72e19
+// hashes, the real shape an XBT gateway prints. parseNetworkDifficulty turns
+// that back into a difficulty of ~6.33e9.
 const soloGatewayPage = `<html><head><title>DATUM Gateway Status</title></head><body>
   <tr><td>Pool Shares Accepted:</td><td>0 (0 diff)</td></tr>
   <tr><td>Pool Shares Rejected:</td><td>0 (0 diff)</td></tr>
@@ -379,7 +382,7 @@ const soloGatewayPage = `<html><head><title>DATUM Gateway Status</title></head><
   <tr><td>Pool Host:</td><td>N/A</td></tr>
   <tr><td>Pool Tag:</td><td>"d8dd1618"</td></tr>
   <tr><td>Block Height:</td><td>975730</td></tr>
-  <tr><td>Block Difficulty:</td><td>4625039957.661</td></tr>
+  <tr><td>Block Difficulty:</td><td>27.2E</td></tr>
 </body></html>`
 
 func inspectPage(t *testing.T, page string) *gatewayHealth {
@@ -395,13 +398,47 @@ func inspectPage(t *testing.T, page string) *gatewayHealth {
 	return h
 }
 
+// parseNetworkDifficulty must scale DATUM's SI suffix and normalise the WORK it
+// prints (difficulty x 2^32 hashes) back to a difficulty. Reading "27.2E" as
+// 27.2 -- dropping the suffix and skipping the normalisation -- put the solo
+// card off by ~2.7e11 and produced "~1 min to a block, 1 in 1 chance per day"
+// for a sub-terahash miner whose real odds are a block every year or so.
+func TestParseNetworkDifficulty(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		text string
+		want float64
+	}{
+		// siScale[""]=1, so a plain value is still read as work and /2^32'd.
+		{"plain number is work in hashes", "Block Difficulty: 4294967296", 4294967296.0 / twoPow32},
+		{"exa suffix, the real XBT shape", "Block Difficulty: 27.2E", 27.2 * 1e18 / twoPow32},
+		{"no whitespace before the suffix", "Block Difficulty:27.2E", 27.2 * 1e18 / twoPow32},
+		{"peta suffix", "Block Difficulty: 123.5P", 123.5 * 1e15 / twoPow32},
+		{"lowercase kilo scales like K", "Block Difficulty: 50k", 50 * 1e3 / twoPow32},
+		// Tags are stripped before parsing, so the next label follows the value.
+		{"suffix before the next label", "Block Difficulty: 27.2E Version: a0000000", 27.2 * 1e18 / twoPow32},
+		{"next label is not a suffix", "Block Difficulty: 4294967296 Total Shares: 9", 4294967296.0 / twoPow32},
+		{"next label on another line", "Block Difficulty: 4294967296\nPrevious Block: x", 4294967296.0 / twoPow32},
+		{"absent field is zero", "Block Height: 975730", 0},
+		{"unparseable value is zero", "Block Difficulty: n/a", 0},
+	} {
+		// Exact compare: want mirrors the parser's own float operations.
+		if got := parseNetworkDifficulty(c.text); got != c.want {
+			t.Errorf("%s: parseNetworkDifficulty(%q) = %v, want %v", c.name, c.text, got, c.want)
+		}
+	}
+}
+
 // The solo entry's "no pool" is the point, not an outage. The same page on an
 // UNMARKED entry keeps today's warning: that is the off-path workaround, and
 // it is flagged, not stopped.
 func TestSoloRoleSilencesTheUnpooledWarning(t *testing.T) {
 	h := inspectPage(t, soloGatewayPage)
-	if h.NetworkDifficulty != 4625039957.661 {
-		t.Errorf("NetworkDifficulty = %v, want 4625039957.661", h.NetworkDifficulty)
+	// 27.2E hashes of work, normalised to difficulty. Same float ops as the
+	// parser, so this compares exactly.
+	wantDiff := 27.2 * 1e18 / twoPow32
+	if h.NetworkDifficulty != wantDiff {
+		t.Errorf("NetworkDifficulty = %v, want %v", h.NetworkDifficulty, wantDiff)
 	}
 
 	solo := *h

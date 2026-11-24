@@ -52,6 +52,12 @@
      unlike every status colour here -- green, red, amber, gold -- so it
      cannot be read as one. */
   --solo:      #8b7cf6;
+  /* A gateway set to 0%. Like --solo it is not a verdict: nothing is wrong and
+     nothing is degraded, the operator asked for this gateway to get no rigs. But
+     unlike every other idle state it will not change on its own, so its 0.00%
+     has to stand out from an ordinary share. Its own hue, shared with no status
+     colour. */
+  --parked:    #d183c4;
 }
 
 * { box-sizing: border-box; }
@@ -75,7 +81,7 @@ main { flex: 1 0 auto; padding: 1rem 1.2rem 1.1rem; display: flex; flex-directio
 body > * { min-width: 0; }
 
 header {
-  display: flex; align-items: center; gap: 0.75rem;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem;
   padding: 0.7rem 1.2rem;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
@@ -207,6 +213,19 @@ header button[title], .tip[title] { cursor: pointer; }
 .btn.add { border-color: var(--good); color: var(--good); }
 .btn.add:hover:not(:disabled) { border-color: var(--good); filter: brightness(1.25); }
 
+/* Attention nudge for the one or two buttons that are the operator's next step
+   on an otherwise empty setup -- Set up switchyard on the gate, and Add rig /
+   Add pool / Add solo gateway inside the form while that side is still empty.
+   A soft green glow only (box-shadow), so it never shifts layout or the text
+   beside it. A NEW class, deliberately not .pulse: that one belongs to the flow
+   diagram's dots and is display:none'd when motion is off, which must never
+   happen to a button the operator needs to press. */
+.btn.nudge { animation: nudge 1.4s ease-in-out infinite; }
+@keyframes nudge {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--good), transparent 100%); }
+  50%      { box-shadow: 0 0 0 5px color-mix(in oklab, var(--good), transparent 72%); }
+}
+
 /* ---- config forms ---- */
 .group + .group { margin-top: 1.4rem; }
 .group > h3 {
@@ -230,6 +249,22 @@ header button[title], .tip[title] { cursor: pointer; }
   font-size: 0.6rem; letter-spacing: .12em; color: var(--solo);
   border: 1px solid var(--solo); border-radius: 3px; padding: 0 0.3rem;
 }
+.card .chead .draghandle {
+  flex: 0 0 auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 1.3rem; height: 1.3rem;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: var(--panel); color: var(--dim);
+  cursor: grab; font-size: 0.6rem; line-height: 1; letter-spacing: -2px;
+  user-select: none;
+}
+.card .chead .draghandle:hover { color: var(--text); border-color: var(--dim); }
+.card .chead .draghandle:active { cursor: grabbing; }
+.card .chead .draghandle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.card.dragging { opacity: 0.45; }
+/* Insertion line, drawn INSIDE the card so nothing shifts while dragging over. */
+.card.drop-before { box-shadow: inset 0 4px 0 -2px var(--accent); }
+.card.drop-after  { box-shadow: inset 0 -4px 0 -2px var(--accent); }
 .fgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.55rem 0.8rem; }
 @media (max-width: 640px) { .fgrid { grid-template-columns: 1fr; } }
 .f { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
@@ -413,6 +448,7 @@ header .help { margin-left: 0.35rem; }
 #helpPop p:last-child { margin-bottom: 0; }
 #helpPop b { color: var(--accent); font-weight: 600; }
 #helpPop .k { color: var(--dim); font-variant-numeric: tabular-nums; }
+#helpPop .parked { color: var(--parked); font-weight: 600; }
 
 /* ---- readout strip ---- */
 /* CAP THE CARD, NOT THE ROW.
@@ -496,6 +532,20 @@ header .help { margin-left: 0.35rem; }
   transition: border-color .6s, box-shadow .6s, background .6s;
 }
 .node .n { font-weight: 600; font-size: 0.9rem; }
+/* A gateway card's heading row: the name on the left, its configured share of
+   the rotation on the right. A flex row rather than an absolutely positioned
+   corner so a long gateway name wraps instead of running under the number. */
+.node .nhead { display: flex; justify-content: space-between; align-items: baseline; gap: 0.75rem; }
+.node .nhead .n { min-width: 0; overflow-wrap: anywhere; }
+.node .split {
+  flex: none; padding: 0; border: 0; background: none;
+  font: inherit; font-size: 0.73rem; color: var(--dim); font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.node .split:hover { color: var(--text); text-decoration: underline; }
+/* After :hover, which has the same specificity: a 0% stays orchid under the
+   pointer too. */
+.node .split.zero { color: var(--parked); }
 .node .m { font-size: 0.73rem; color: var(--dim); }
 .node .m b { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
 .node .m .sentinel { color: var(--sentinel); font-style: italic; }
@@ -568,17 +618,21 @@ header .help { margin-left: 0.35rem; }
 /* Three columns rather than a flex run: the port left, the arrow on a fixed
    centre, the pool right. With names of different lengths a left-aligned run
    put every arrow at a different x, so the eye had to re-find the mapping on
-   each row; pinned to a column they read as one table. */
+   each row; pinned to a column they read as one table.
+   The outer columns have to be EQUAL for that to hold. Each row is its own grid,
+   so "auto 1fr auto" sized the name column per row and the arrow, centred in
+   what was left over, moved with the length of the name. */
 .port {
-  display: grid; grid-template-columns: auto 1fr auto;
+  display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: baseline; gap: 0.5rem;
   font-size: 0.73rem; color: var(--dim);
   padding: 0.2rem 0.1rem;
 }
 .port .p { color: var(--text); font-variant-numeric: tabular-nums; text-align: left; }
 .port .arrow { text-align: center; color: var(--heartbeat); }
-.port .to { color: var(--good); text-align: right; }
+.port .to { color: var(--good); text-align: right; overflow-wrap: anywhere; }
 .port .to.none { color: var(--sentinel); }
+.port .to.solo { color: var(--solo); }
 
 /* Solid means carrying work; dashed means held open but idle. The earlier
    version had these backwards -- a dash reads as a weak or intermittent
@@ -660,13 +714,36 @@ details.sec > summary .label .hint { margin-left: 0.5rem; }
 
 /* ---- share of work ---- */
 .conv { display: flex; flex-direction: column; gap: 0.6rem; }
-/* One template for both: the axis row's tick track only lines up under the
-   bars while its columns match the bar rows exactly. As two declarations that
-   held by coincidence, and any later change to the name or numbers column
-   would have slid the ticks out from under the bars silently. */
-.crow, .cscale { display: grid; grid-template-columns: 7rem 1fr 20rem; gap: 1rem; align-items: center; }
+/* One template for all three: the axis row's tick track and the column titles
+   only line up with the bars while their columns match the bar rows exactly. As
+   separate declarations that held by coincidence, and any later change to the
+   name or numbers column would have slid them out of line silently. */
+.crow, .cscale, .chead { display: grid; gap: 1rem; align-items: center; }
+@media (min-width: 1101px) {
+  .crow, .cscale, .chead { grid-template-columns: 7rem 1fr 1fr 22rem; }
+  .view-overall .crow, .view-overall .cscale, .view-overall .chead,
+  .view-target .crow, .view-target .cscale, .view-target .chead {
+    grid-template-columns: 7rem 1fr 22rem;
+  }
+}
+/* Too narrow for two bars beside the name and numbers: everything stacks, and
+   the column titles go, since the rows no longer sit under them. */
+@media (max-width: 1100px) {
+  .crow, .cscale { grid-template-columns: 1fr; gap: 0.7rem; }
+  .chead { display: none; }
+  .crow .cnum { text-align: left; }
+}
+.ctitle { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.09em; color: var(--dim); }
 .cname { font-weight: 600; }
+.soloname { color: var(--solo); }
+.parked { color: var(--parked); }
 .bar { position: relative; height: 1rem; background: rgba(255,255,255,.04); border-radius: 3px; }
+/* A 0% pool: nothing to measure and nothing meant to arrive. Hatched so it does
+   not read as a bar waiting for its first share. */
+.bar.parked {
+  background: repeating-linear-gradient(135deg,
+    rgba(255,255,255,.10) 0 3px, rgba(255,255,255,.02) 3px 9px);
+}
 
 /* The zones ARE the legend.
    Colour used to live on the bar itself, which meant the one thing you needed
@@ -684,6 +761,13 @@ details.sec > summary .label .hint { margin-left: 0.5rem; }
 .bar .zone.ok   { background: rgba(79,195,161,.20); }
 .bar .zone.warn { background: rgba(217,154,43,.16); }
 .bar .zone.bad  { background: rgba(232,93,93,.14); }
+/* The red zones on the Overall view. There the ranges narrow toward the target
+   while the scale stays put, so red ends up covering nearly the whole bar and a
+   healthy pool looks like an alarm. So it is nearly clear where the zone meets
+   the range and only reaches full strength at the end of the bar, which is also
+   how serious it would be for a pool to actually be out there. */
+.bar .zone.bad.fade-left  { background: linear-gradient(to left,  rgba(232,93,93,.01), rgba(232,93,93,.14)); }
+.bar .zone.bad.fade-right { background: linear-gradient(to right, rgba(232,93,93,.01), rgba(232,93,93,.14)); }
 /* Hairlines where one zone gives way to the next. The boundary is the number
    people actually read off this chart, so it gets an edge rather than being
    left to a change in fill alone. */
@@ -714,29 +798,35 @@ details.sec > summary .label .hint { margin-left: 0.5rem; }
 .bar .got.ok   { background: rgba(79,195,161,.50); border-right-color: var(--good); }
 .bar .got.warn { background: rgba(217,154,43,.50); border-right-color: var(--accent); }
 .bar .got.bad  { background: rgba(232,93,93,.50);  border-right-color: var(--bad); }
+/* On-target view: the bar grows from the target rather than from the left edge,
+   so an undershoot's bright cap belongs on its left. */
+.bar .got.fromtarget { border-radius: 0; }
+.bar .got.under { border-right: 0; border-left: 2px solid var(--text); }
+.bar .got.under.ok   { border-left-color: var(--good); }
+.bar .got.under.warn { border-left-color: var(--accent); }
+.bar .got.under.bad  { border-left-color: var(--bad); }
 /* Ideal split: the one landmark, taller than everything else so it reads as a
    reference line rather than another band edge. */
 .bar .exp {
   position: absolute; top: -6px; bottom: -6px; width: 2px;
   background: var(--landmark); z-index: 3; cursor: help;
 }
-/* THE AXIS ZOOMS, SO IT HAS TO BE LABELLED.
+/* THE ON-TARGET VIEW ZOOMS, SO IT HAS TO BE LABELLED.
    The window is a multiple of sigma, and sigma shrinks as rotations
    accumulate -- so the coloured zones sit at the same fractions of the bar
-   forever and the chart looks identical after fifteen hours as after one. It
+   forever and the view looks identical after fifteen hours as after one. It
    is not stuck: it is zooming in at exactly the rate the band narrows. That
    is the right behaviour (a band you cannot see the edges of is useless) but
-   with no numbers on the axis it is indistinguishable from nothing happening.
-   These ticks are how the zoom becomes legible: the endpoints converge on the
-   even split as the estimate tightens. */
+   it needs saying somewhere: the sigma ticks name the scale, and each row's
+   "1 sigma = x TH/s" says what that scale is worth there. */
 .cscale { margin-top: -0.1rem; }
 .cscale .track { position: relative; height: 1.1rem; border-top: 1px solid rgba(255,255,255,.08); }
 .cscale .t {
   position: absolute; top: 0.15rem; font-size: 0.66rem; color: var(--dim);
   font-variant-numeric: tabular-nums; white-space: nowrap;
 }
-/* Interior ticks are centred on a left set from JS -- where the even split
-   and the sigma breakpoints fall is not a constant, see the renderer. The two
+/* Interior ticks are centred on a left set from JS -- where the target and the
+   sigma breakpoints fall is not a constant, see the renderer. The two
    ends are pinned to the edges instead, and need an explicit left/right: an
    absolutely positioned element with left:auto falls back to its static
    position, which once stacked lo and mid on top of each other. */
@@ -755,6 +845,12 @@ details.sec > summary .label .hint { margin-left: 0.5rem; }
 
 .cnum { font-size: 0.75rem; color: var(--dim); font-variant-numeric: tabular-nums; text-align: right; }
 .cnum b { color: var(--text); font-weight: 500; }
+/* Each figure in the colour of what it reads off the bar: the actual in the zone
+   its tip landed in, the target in the colour of the target tick. */
+.cnum b.ok   { color: var(--good); }
+.cnum b.warn { color: var(--accent); }
+.cnum b.bad  { color: var(--bad); }
+.cnum .ctarget { color: var(--landmark); }
 .cnum .dev.ok   { color: var(--good); }
 .cnum .dev.warn { color: var(--accent); }
 .cnum .dev.bad  { color: var(--bad); }
@@ -840,9 +936,12 @@ p.foot { font-size: 0.7rem; color: var(--sentinel); margin: 0.5rem 0 0; }
    beats a silent one in both directions. */
 :root[data-motion="off"] .pulse,
 :root[data-motion="off"] .spark { display: none; }
+/* A button is essential, so motion-off stills its glow rather than hiding it. */
+:root[data-motion="off"] .btn.nudge { animation: none; }
 @media (prefers-reduced-motion: reduce) {
   :root:not([data-motion="on"]) .pulse,
   :root:not([data-motion="on"]) .spark { display: none; }
+  :root:not([data-motion="on"]) .btn.nudge { animation: none; }
   :root:not([data-motion="on"]) .node.arrive { animation: arriveStill 2.6s ease-out; }
   :root:not([data-motion="on"]) .node.depart { animation: departStill 2.6s ease-out; }
 }
@@ -854,6 +953,95 @@ p.foot { font-size: 0.7rem; color: var(--sentinel); margin: 0.5rem 0 0; }
   0%, 60% { border-color: var(--heartbeat); background: rgba(107,118,132,.13); }
   100%    { border-color: var(--border); background: var(--panel); }
 }
+
+/* ---- Hashrate split editor (Configure modal) ------------------------------
+   A proportional-split control: one full-width bar that is 100% by
+   construction, so an invalid total cannot be shown. Lives in the editor, not
+   the polling dashboard, so it is free of the write-on-change discipline the
+   live page needs. */
+.splitbar {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 2.2rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--bg);
+  user-select: none;
+  margin-top: 0.9rem;
+}
+.splitseg {
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+  min-width: 0; height: 100%;
+  font-size: 0.72rem; font-weight: 600; color: #0b0e12;
+  white-space: nowrap; overflow: hidden;
+}
+.splitseg .slabel { padding: 0 0.3rem; pointer-events: none; }
+.splitseg.locked {
+  background-image: repeating-linear-gradient(45deg,
+    rgba(255,255,255,0.28) 0, rgba(255,255,255,0.28) 6px,
+    transparent 6px, transparent 12px);
+}
+/* Solo identity on the bar: an inset ring plus a corner badge, so the solo
+   segment is marked as such and not merely "the purple one". */
+.splitseg.solo { box-shadow: inset 0 0 0 2px rgba(11,14,18,0.35); }
+.segsolo {
+  position: absolute; top: 2px; left: 4px; pointer-events: none;
+  font-size: 0.5rem; font-weight: 700; letter-spacing: 0.08em; color: #0b0e12; opacity: 0.8;
+}
+/* A lock glyph on the segment itself when its pool is locked. */
+.seglock {
+  position: absolute; top: 1px; right: 3px; pointer-events: none;
+  font-size: 0.6rem; line-height: 1;
+}
+/* The handle track sits BELOW the bar, not on it, so grips never cover the
+   segment labels. */
+.splittrack { position: relative; height: 1.1rem; margin-top: 0.15rem; }
+.splitgrip {
+  position: absolute; top: 0; transform: translateX(-50%);
+  width: 1.5rem; height: 1rem;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: var(--panel); color: var(--dim);
+  font-size: 0.6rem; line-height: 1; cursor: grab; touch-action: none;
+}
+.splitgrip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.splitgrip.locked { opacity: 0.35; cursor: not-allowed; }
+.splitactions { display: flex; justify-content: flex-end; margin-top: 0.5rem; }
+/* One shared grid for all rows, with each row's cells spilled into it via
+   display:contents, so every column lines up across rows. The name column sizes
+   to the longest name (capped and ellipsised), which keeps each input right
+   next to its pool name AND aligned with the others -- a long name can no longer
+   shove an input around or break the alignment. */
+.splitrows {
+  margin-top: 0.6rem;
+  display: grid;
+  grid-template-columns: auto auto auto auto auto;
+  align-items: center;
+  gap: 0.35rem 0.6rem;
+  justify-content: start;
+}
+.splitrow { display: contents; }
+/* display:contents leaves the row with no box, so dim the cells instead -- but
+   not the lock button, which stays crisp so it is easy to click to unlock. */
+.splitrow.locked > :not(.splitlock) { opacity: 0.55; }
+.splitrow.solo .splitname { color: var(--solo); }
+.splitlock {
+  flex: 0 0 auto; width: 1.7rem; height: 1.7rem;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: var(--panel); color: var(--text);
+  cursor: pointer; font-size: 0.8rem; line-height: 1;
+}
+.splitswatch { flex: 0 0 auto; width: 0.85rem; height: 0.85rem; border-radius: 2px; }
+.splitname { max-width: 14rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.splitnum {
+  flex: 0 0 auto; width: 4.2rem; text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.splitnum:disabled { opacity: 0.5; }
+.splitpct { flex: 0 0 auto; color: var(--dim); width: 0.9rem; }
 </style>
 </head>
 <body>
@@ -868,6 +1056,7 @@ p.foot { font-size: 0.7rem; color: var(--sentinel); margin: 0.5rem 0 0; }
   <button id="rotateBtn" class="act">rotate now</button><button class="help" type="button" data-help="rotate" aria-label="What is this?">?</button>
   <button id="motionBtn">motion: auto</button><button class="help" type="button" data-help="motion" aria-label="What is this?">?</button>
   <button id="flowBtn">flow: scaled</button><button class="help" type="button" data-help="flowMode" aria-label="What is this?">?</button>
+  <button id="chartBtn">chart: both</button><button class="help" type="button" data-help="chartView" aria-label="What is this?">?</button>
   <button id="resetBtn" class="danger">reset stats</button><button class="help" type="button" data-help="reset" aria-label="What is this?">?</button>
 </header>
 
@@ -881,13 +1070,14 @@ p.foot { font-size: 0.7rem; color: var(--sentinel); margin: 0.5rem 0 0; }
     <div class="inner">
       <h2 id="setupGateTitle">Nothing configured yet</h2>
       <p id="setupGateLede">Switchyard moves miners between DATUM gateways so
-         each pool gets an even share of your work. It needs to know about at
-         least one rig and one pool before it can do anything.</p>
+         each pool gets its share of your work &mdash; an even split by default,
+         or a custom one you set. It needs to know about at least one rig and
+         one pool before it can do anything.</p>
       <p>Everything set up here is written to <code>config.json</code>.
          That file is the source of truth &mdash; editing it by hand and
          restarting works exactly the same way, and this form is only a
          convenience.</p>
-      <button class="btn primary" id="setupStartBtn">Set up switchyard</button>
+      <button class="btn primary nudge" id="setupStartBtn">Set up switchyard</button>
     </div>
   </section>
 
@@ -919,15 +1109,14 @@ p.foot { font-size: 0.7rem; color: var(--sentinel); margin: 0.5rem 0 0; }
 
   <section>
     <details class="sec" open>
-      <summary><p class="label"><span class="caret">&#9656;</span>Share of work vs an even split<button class="help" type="button" data-help="share" aria-label="What is this?">?</button><span class="hint" id="convHint"></span></p></summary>
+      <summary><p class="label"><span class="caret">&#9656;</span>Share of work vs target<button class="help" type="button" data-help="share" aria-label="What is this?">?</button><span class="hint" id="convHint"></span></p></summary>
     <div class="panel">
     <div class="clegend">
       <span class="li"><span class="sw got"></span>share received</span>
-      <span class="li"><span class="sw tick"></span>even split</span>
+      <span class="li"><span class="sw tick"></span>target</span>
       <span class="li"><span class="sw zok"></span>within 1&sigma;</span>
       <span class="li"><span class="sw zwarn"></span>1&ndash;2&sigma;</span>
       <span class="li"><span class="sw zbad"></span>beyond 2&sigma;</span>
-      <span class="li" id="legendVals"></span>
     </div>
     <div class="conv" id="conv"></div>
     </div>
@@ -1116,9 +1305,19 @@ function waitLabel(r) {
 
 function ths(v) { v = v || 0; if (v === 0) return "0.00"; return v < 0.01 ? v.toFixed(3) : v.toFixed(2); }
 
-// The solo node's title. One constant, because the node is built once and
-// its heading is re-checked every poll.
-var SOLO_TITLE = "Solo \u2192 network";
+// The title of the solo gateway's pool card: there is no pool behind it, only
+// the network. One constant, because the node is built once and its heading is
+// re-checked every poll.
+var NETWORK_TITLE = "Network";
+
+// How many rotations the share-of-work chart calls its ranges early for.
+var BAND_SETTLE_ROTATIONS = 3;
+
+// poolNameNode is a pool's name for a table cell, in the solo colour on the solo
+// gateway.
+function poolNameNode(name, solo) {
+  return solo ? el("span", "soloname", name) : document.createTextNode(name);
+}
 
 // Odds of the solo slot finding a block, at the hashrate it has actually
 // averaged. A block takes difficulty x 2^32 hashes on average, so the
@@ -1254,10 +1453,9 @@ markOf(row, "<p><b>Listener for " + r.name + ".</b> Point that miner here and le
     nodes.ports[i] = { row: row, to: to };
   });
   h.appendChild(el("div", "sep"));
-  var hm2 = el("div", "m");
-  h.appendChild(hm2);
+  h.appendChild(el("div", "m", "balancing hashrate to gateways by target split"));
   hub.appendChild(h);
-  nodes.hub = { box: h, line1: hm, line2: hm2 };
+  nodes.hub = { box: h, line1: hm };
 
   // The gateways carry every measured number, because every measured number is
   // a fact about switchyard's own socket to them.
@@ -1273,7 +1471,19 @@ markOf(n, "<p><b>A DATUM gateway</b> running on this machine. This is what "
       + "<p>Every figure on this card — difficulty, accepted, rejected, "
       + "hashrate — is measured on that socket. It is what switchyard can "
       + "see. What the gateway then forwards is the gateway's business.</p>");
-    n.appendChild(el("div", "n", p.gateway || p.name));
+    var head = el("div", "nhead"), split = el("button", "split");
+    split.type = "button";
+    // Before the tooltip wiring, which adds its own click toggle to anything with
+    // a mark: stopped here, it cannot open a tooltip over the modal on a touch
+    // screen, where there is no hover to have shown it first.
+    split.addEventListener("click", function (ev) {
+      ev.stopImmediatePropagation();
+      hideHelp();
+      openConfig(false, true);
+    });
+    head.appendChild(el("div", "n", p.gateway || p.name));
+    head.appendChild(split);
+    n.appendChild(head);
     n.appendChild(el("div", "gwaddr", p.addr || ""));
     var occ = el("div", "m"), now = el("div", "m"), diff = el("div", "m"), sh = el("div", "m");
     var mode = el("div", "m");
@@ -1283,7 +1493,7 @@ markOf(n, "<p><b>A DATUM gateway</b> running on this machine. This is what "
     // By index, like the rigs: a rename in CONFIGURE changes the label under
     // a node that already exists, and a name-keyed lookup would silently
     // miss from that moment on.
-    nodes.gws[j] = { box: n, occ: occ, now: now, diff: diff, sh: sh, mode: mode };
+    nodes.gws[j] = { box: n, split: split, occ: occ, now: now, diff: diff, sh: sh, mode: mode };
   });
 
   // The pools carry only what an operator told us plus the long-run share,
@@ -1303,7 +1513,7 @@ markOf(n, "<p><b>The pool behind that gateway</b> — and the one thing on this 
       + "— and it is what the fairness band below is measuring.</p>"
       + "<p>The name and address are labels from "
       + "<span class=\"k\">config.json</span>, not anything discovered.</p>");
-    n.appendChild(el("div", "n", p.solo ? SOLO_TITLE : p.name));
+    n.appendChild(el("div", "n", p.solo ? NETWORK_TITLE : p.name));
     if (p.solo) {
 markOf(n, "<p><b>The solo slot.</b> The gateway in front of this is "
         + "configured with no pool: while a rig is on it, it is mining solo "
@@ -1311,7 +1521,8 @@ markOf(n, "<p><b>The solo slot.</b> The gateway in front of this is "
         + "<p>Nothing crosses this last hop until a block is found. When one "
         + "is, your node broadcasts it to the network and the whole reward "
         + "is yours, which is why the line here carries no dots.</p>"
-        + "<p>It gets the same share of rotation time as every pool.</p>");
+        + "<p>It takes a share of rotation time like any pool; its gateway card "
+        + "shows how much.</p>");
     }
     var host = el("div", "m"), avg = el("div", "m"), health = el("div", "m");
     n.appendChild(host); n.appendChild(avg); n.appendChild(health);
@@ -1472,34 +1683,54 @@ markOf(n.avg, "<p><b>Average over the whole run</b>, across every pool this rig 
     setClass(n.box, "node " + (st === "live" ? "live" : st === "arriving" ? "arriving" : "offline"));
   });
 
-  var carrying = 0;
-  d.pools.forEach(function (p) { if (p.occupants.length) carrying++; });
   nodes.hub.line1.textContent = d.rigs.length + " rigs × " + d.pools.length + " gateways · "
     + (d.rigs.length * d.pools.length) + " sessions held open";
-  nodes.hub.line2.textContent = "rig i → pool (i+t) mod " + d.pools.length
-    + " · " + carrying + " carrying, " + (d.pools.length - carrying) + " dark";
 
+  var soloPool = d.pools.filter(function (p) { return p.solo; })[0];
   d.rigs.forEach(function (r, i) {
     var pr = nodes.ports[i];
     if (!pr) return;
     pr.to.textContent = r.boundTo || "unbound";
-    setClass(pr.to, "to" + (r.boundTo ? "" : " none"));
+    setClass(pr.to, "to" + (r.boundTo ? "" : " none")
+      + ((soloPool && r.boundTo === soloPool.name) ? " solo" : ""));
   });
 
   d.pools.forEach(function (p, j) {
     var n = nodes.gws[j];
     if (!n) return;
 
+    // The configured target, not a measurement: it answers "what did I ask this
+    // gateway to get?" without opening CONFIGURE. An even split shows too -- it
+    // is just as much the intended share, and a number that only appeared on
+    // custom splits would leave its absence to be interpreted.
+    var splitText = p.expectedPct.toFixed(2) + "%";
+    if (n.split.textContent !== splitText) n.split.textContent = splitText;
+    setClass(n.split, p.expectedPct === 0 ? "split zero" : "split");
+markOf(n.split, p.expectedPct === 0
+      ? "<p><span class=\"parked\">No rig: this gateway is set to 0%.</span> No rig "
+        + "is sent here, not on a rotation and not as a fallback when other "
+        + "gateways are down. Switchyard still holds its session open.</p>"
+        + "<p>Click to change it in <b>CONFIGURE</b>.</p>"
+      : "<p><b>This gateway's configured share</b> of your hashrate over time. It "
+        + "is the target the rotation steers toward, not what has been delivered "
+        + "so far; the pool card and the fairness band show that.</p>"
+        + "<p>Click to change it in <b>CONFIGURE</b>.</p>");
+
     if (p.occupants.length) {
       setMeta(n.occ, [{ tag: "span", text: p.occupants.join(", ") }]);
 markOf(n.occ, "<p><b>The rig currently bound to this gateway.</b> Its work is "
         + "reaching this gateway and no other.</p>");
+    } else if (p.expectedPct === 0) {
+      // The orchid 0.00% and its tooltip say this; a line here would only crowd
+      // the card.
+      setMeta(n.occ, []);
     } else {
       setMeta(n.occ, [{ tag: "span", cls: "sentinel", text: "no rig this block" }]);
 markOf(n.occ, "<p><b>No rig is on this gateway right now</b>, and that is the scheme "
         + "working rather than a fault.</p>"
-        + "<p>With fewer rigs than gateways, one is always dark. It takes its "
-        + "turn on the next rotation — which is exactly why the fairness "
+        + "<p>Each rotation sends every rig to the pool furthest behind its target, "
+        + "so a gateway can go without one for a while, and the smaller its share "
+        + "the longer. It catches up on later rotations, which is why the fairness "
         + "band below counts rotations rather than shares.</p>");
     }
 
@@ -1560,10 +1791,9 @@ markOf(n.mode, "<p><b>This entry is marked solo, but its gateway is pointed at "
         + "gateway's <span class=\"k\">pool_host</span> and restart it; to "
         + "keep the pool, add this gateway as an ordinary pool instead.</p>");
     } else if (p.solo) {
-      setMeta(n.mode, [{ tag: "span", cls: "solo", text: "solo by design" }]);
-markOf(n.mode, "<p><b>This gateway has no pool, on purpose.</b> It is the "
-        + "solo slot: configured without a <span class=\"k\">pool_host</span>, "
-        + "it builds from your own node and keeps any block it finds.</p>");
+      // Nothing to say, but this branch has to stay: a solo gateway has no pool,
+      // which is exactly what "unpooled" below warns about on an ordinary one.
+      setMeta(n.mode, []);
     } else if (unpooled) {
       setMeta(n.mode, [{ tag: "span", cls: "warn",
         text: p.health.status + " \u2014 solo mining \u2014 see DATUM Gateway log for more information" }]);
@@ -1597,7 +1827,7 @@ markOf(n.mode, "<p><b>This gateway has no pool.</b> Its Prime connection is down
     if (!n) return;
     // The label can be edited under a node that already exists.
     var poolHeading = n.box.querySelector(".n");
-    var poolTitle = p.solo ? SOLO_TITLE : p.name;
+    var poolTitle = p.solo ? NETWORK_TITLE : p.name;
     if (poolHeading && poolHeading.textContent !== poolTitle) poolHeading.textContent = poolTitle;
 
     if (p.solo) {
@@ -2579,10 +2809,10 @@ function flash(n, cls) {
 // Written per zone rather than once for the chart, because the useful question
 // is always "what does it mean that I am HERE", and the answer differs by
 // region in kind rather than degree.
-function zoneHelp(kind, p, evenThs, sigThs) {
+function zoneHelp(kind, p, targetThs, sigThs) {
   var lo, hi;
   if (kind === "ok") {
-    lo = evenThs - sigThs; hi = evenThs + sigThs;
+    lo = targetThs - sigThs; hi = targetThs + sigThs;
     return "<p><b>Within one standard deviation \u2014 ordinary.</b></p>"
       + "<p><span class=\"k\">" + ths(lo) + " \u2013 " + ths(hi) + " TH/s</span> "
       + "&middot; <span class=\"k\">"
@@ -2599,209 +2829,268 @@ function zoneHelp(kind, p, evenThs, sigThs) {
       + "rotations accumulate.</p>";
   }
   return "<p><b>Beyond two standard deviations.</b></p>"
-    + "<p>About one run in twenty gets here by luck alone, so this is where an "
-    + "even split stops being a plausible explanation and a gateway that has "
+    + "<p>About one run in twenty gets here by luck alone, so this is where the "
+    + "target split stops being a plausible explanation and a gateway that has "
     + "been down, unreachable, or refusing work becomes the likelier one.</p>"
     + "<p>Check that gateway's card above: its share difficulty, its accepted "
     + "and rejected counts, and whether the pool behind it is taking the "
     + "work.</p>";
 }
 
+// Red taking over the Overall view looks like an alarm and is the opposite: it
+// grows because the expected range has tightened. Said where people will be
+// looking when they wonder.
+var OVERALL_RED_NOTE = "<p><b>Mostly red is normal.</b> The longer switchyard runs, "
+  + "the narrower the range each pool is expected to land in, so on this fixed "
+  + "scale red grows to fill most of the bar. It is only a concern if a pool's bar "
+  + "actually ends in the red, which means that pool is further from its target "
+  + "than the rotation explains.</p>";
+
+// addZones paints a bar's coloured regions, each span being [from%, to%, kind,
+// optional extra class] along the bar. Drawn first, so everything else paints over them, and as a run
+// of adjacent spans rather than as marks at the boundaries: the question this
+// chart answers is "which region is the bar in", and a region is a thing you can
+// see the edges of.
+function addZones(bar, p, spans, tag) {
+  var sigThs = latestTotalThs * p.sigmaPct / 100;
+  spans.forEach(function (s, i) {
+    if (s[1] <= s[0]) return;
+    var z = el("div", "zone " + s[2] + (s[3] ? " " + s[3] : ""));
+    z.style.left = s[0] + "%";
+    z.style.width = (s[1] - s[0]) + "%";
+    z.dataset.markid = tag + ":" + p.name + ":zone" + i;
+markOf(z, (s[3] ? OVERALL_RED_NOTE : "") + zoneHelp(s[2], p, p.expectedThs, sigThs));
+    bar.appendChild(z);
+  });
+}
+
+// addTargetTick marks where this pool was asked to be.
+function addTargetTick(bar, p, left, tag) {
+  var exp = el("div", "exp");
+  exp.style.left = left + "%";
+  exp.dataset.markid = tag + ":" + p.name + ":target";
+markOf(exp, "<p><b>Target</b> <span class=\"k\">" + p.expectedPct.toFixed(2) + "% · "
+      + ths(p.expectedThs) + " TH/s</span></p>"
+      + "<p>The share this pool was asked for — an even slice when the split "
+      + "is even, or whatever you set it to. It is where the pool sits when the "
+      + "rotation hits the split exactly and luck does not exist; sitting a "
+      + "little off it is ordinary, which is what the green zone either side is "
+      + "for.</p>");
+  bar.appendChild(exp);
+}
+
+// parkedBar is a 0% pool's bar in either view: hatched, because there is nothing
+// to measure and nothing is meant to arrive, which an empty bar would not say.
+function parkedBar() {
+  var bar = el("div", "bar parked");
+markOf(bar, "<p><span class=\"parked\">This gateway is set to 0%.</span> It gets no "
+      + "rigs, so there is no share to measure and no range to measure it "
+      + "against.</p>");
+  return bar;
+}
+
+// overallBar answers "where is my hashrate going?". Its scale never moves: zero
+// to everything, so bars can be compared with each other and a pool on 47% always
+// fills about half the bar. The ranges thin out over time, which is the honest
+// picture from this far back; onTargetBar is the view for reading them.
+function overallBar(p, g) {
+  if (p.expectedPct === 0) return parkedBar();
+  var bar = el("div", "bar");
+  var clamp = function (v) { return Math.max(0, Math.min(100, v)); };
+  if (p.sigmaPct) {
+    var t = p.expectedPct, s = p.sigmaPct;
+    addZones(bar, p, [
+      [0,                clamp(t - 2 * s), "bad", "fade-left"],
+      [clamp(t - 2 * s), clamp(t - s),     "warn"],
+      [clamp(t - s),     clamp(t + s),     "ok"],
+      [clamp(t + s),     clamp(t + 2 * s), "warn"],
+      [clamp(t + 2 * s), 100,              "bad", "fade-right"]
+    ], "overall");
+  }
+  var got = el("div", "got" + (g === "none" ? "" : " " + g));
+  got.style.width = clamp(p.sharePct) + "%";
+  got.dataset.markid = "overall:" + p.name + ":got";
+markOf(got, "<p><b>" + ths(p.ths) + " TH/s</b> — this pool's share of everything "
+      + "switchyard has placed so far, <span class=\"k\">"
+      + p.sharePct.toFixed(2) + "%</span> of the total.</p>");
+  bar.appendChild(got);
+  addTargetTick(bar, p, clamp(p.expectedPct), "overall");
+  return bar;
+}
+
+// onTargetBar answers "is this pool holding its target?". Every bar is zoomed to
+// its own range, in sigma rather than TH/s: since one sigma is a different rate
+// on every row, a scale in rates would need its own labels on every row, while in
+// sigma the boundaries land in the same place on all of them and one row of
+// labels serves the whole chart. It is also why the targets form one column.
+//
+// The bar grows from the target, left for under and right for over, so its length
+// IS the miss. Grown from the left edge of a window like this one, a bar's length
+// would measure nothing.
+//
+// sigmaWindow is shared, for the same reason as the labels. Widening only the row that
+// has wandered would leave its zones out of line with every other row.
+function onTargetBar(p, g, sigmaWindow) {
+  if (p.expectedPct === 0) return parkedBar();
+  var bar = el("div", "bar");
+  // No band: no shares yet, or a pool taking all the work. Nothing to zoom to.
+  if (!p.sigmaPct) return bar;
+  var at = function (sigmas) {
+    return 50 + Math.max(-1, Math.min(1, sigmas / sigmaWindow)) * 50;
+  };
+  addZones(bar, p, [
+    [0,      at(-2), "bad"],
+    [at(-2), at(-1), "warn"],
+    [at(-1), at(1),  "ok"],
+    [at(1),  at(2),  "warn"],
+    [at(2),  100,    "bad"]
+  ], "target");
+  var tip = at(p.sigmas), under = p.sigmas < 0;
+  var got = el("div", "got fromtarget" + (under ? " under" : "") + (g === "none" ? "" : " " + g));
+  got.style.left = Math.min(50, tip) + "%";
+  got.style.width = Math.abs(tip - 50) + "%";
+  got.dataset.markid = "target:" + p.name + ":got";
+  var dev = p.sharePct - p.expectedPct;
+markOf(got, "<p><b>" + (under ? "−" : "+") + Math.abs(p.sigmas).toFixed(1) + "σ</b> "
+      + "from target — <span class=\"k\">" + ths(p.ths) + " of "
+      + ths(p.expectedThs) + " TH/s</span>, " + Math.abs(dev).toFixed(2) + " points "
+      + (under ? "under" : "over") + ".</p>"
+      + "<p>The bar starts at the target and grows toward where this pool actually "
+      + "is. Its length is the miss.</p>");
+  bar.appendChild(got);
+  addTargetTick(bar, p, 50, "target");
+  return bar;
+}
+
 // ---- share of work ---------------------------------------------------------
+//
+// Two questions, and no single scale can answer both. "Where is my hashrate
+// going?" needs a scale that stays put, and "is each pool holding its target?"
+// needs one that zooms in as the ranges narrow. With different targets one scale
+// cannot zoom far either: it has to keep every target in frame, so it stalls at
+// the span between the lowest and highest while the ranges shrink to slivers. So
+// the chart draws each question separately; see overallBar and onTargetBar.
+var latestTotalThs = 0;
+var chartView = "both";
+
 function renderConv(d) {
   var box = $("conv");
   box.textContent = "";
+  latestTotalThs = d.totalThs;
+  setClass(box, "conv view-" + chartView);
+  var showOverall = chartView !== "target", showTarget = chartView !== "overall";
 
-  // THE AXIS IS A WINDOW AROUND THE EVEN SPLIT, not a scale from zero.
-  //
-  // This is what makes the zones readable at all. A sigma here is a couple of
-  // percentage points against an even split of thirty-three, so on a 0-100
-  // axis the whole green/amber/red structure collapses into the last tenth of
-  // the bar and the thing this chart exists to show is invisible.
-  //
-  // Zero is not an interesting value here anyway. Nobody needs to see the
-  // distance from nothing to a third; they need to see the distance from where
-  // a pool is to where it stops being ordinary. So the window spans a few
-  // sigma either side of the ideal, widened if a pool has wandered outside it,
-  // and every bar starts at the window's left edge rather than at zero.
-  var even = d.pools.length ? 100 / d.pools.length : 1;
-  var sig = d.pools.length ? (d.pools[0].sigmaPct || 0) : 0;
-  var lo, hi;
-  if (sig > 0) {
-    var reach = 3.2 * sig;
-    d.pools.forEach(function (p) {
-      reach = Math.max(reach, Math.abs(p.sharePct - even) * 1.15);
-    });
-    lo = Math.max(0, even - reach);
-    hi = even + reach;
-  } else {
-    // No band yet: a plain scale, so the bars still say something.
-    var max = 0;
-    d.pools.forEach(function (p) { if (p.sharePct > max) max = p.sharePct; });
-    lo = 0;
-    hi = Math.max(max, even) * 1.12 || 1;
-  }
-  var pct = function (v) {
-    return Math.max(0, Math.min(100, ((v - lo) / (hi - lo)) * 100));
-  };
-  // Axis labels are in TH/s, not percent of work. The bands are computed in
-  // percent because sigma is, but the reader is looking at hashrate bars and
-  // asks "what rate would put this pool in amber?" -- a percentage answers a
-  // question nobody asked.
-  //
-  // Precision follows sigma. Neighbouring labels are one sigma apart, and
-  // once that gap drops under a hundredth of a TH/s -- which a settled run
-  // reaches -- two decimals print the same number three times in a row.
-  var sigThs = d.totalThs * sig / 100;
-  var dp = sigThs > 0 ? Math.max(2, Math.ceil(-Math.log10(sigThs))) : 2;
-  var thsOf = function (v) { return (d.totalThs * v / 100).toFixed(dp); };
+  var banded = d.banded;
+  var sig = 0;
+  d.pools.forEach(function (p) { if ((p.sigmaPct || 0) > sig) sig = p.sigmaPct; });
 
-  // Before a full cycle there is no band, and saying so is the honest label --
-  // a pool that has not had its turn is not behind, it is waiting.
-  // THREE cases, not two. With a single pool there is no band and there never
-  // will be one -- every share goes to the only destination there is, so the
-  // share of work is 100% by definition and has no spread to measure. The
-  // two-case version reported that as progress toward a threshold and counted
-  // it as "3 of 1 rotations", which is both wrong and unreachable.
-  // Amber while there are no ranges to show. Before the first full cycle
-  // the chart is three grey bars and nothing else, and the reason lives in
-  // this one line -- as dim hint text it read as decoration and the empty
-  // chart read as broken.
-  var waiting = d.pools.length >= 2 && !sig;
-  setClass($("convHint"), "hint" + (waiting ? " attn" : ""));
-  $("convHint").textContent = d.pools.length < 2
+  // THREE cases, not two. When only one pool has a share there is no band and
+  // there never will be one -- every share goes to the only destination there
+  // is, so the share of work is 100% by definition and has no spread to measure.
+  // Amber while there are no ranges to show, which is only until the first
+  // share: as dim hint text the reason read as decoration and the empty chart
+  // read as broken.
+  var sharing = d.pools.filter(function (p) { return p.expectedPct > 0; }).length;
+  var waiting = sharing >= 2 && !banded;
+  // The ranges are honest from the first share, but this early they and the
+  // bars swing enough that a reading is worth little. Rotations rather than time
+  // because a dwell is what the band is made of, and since the last reset because
+  // a reset leaves the band just as young.
+  var early = sharing >= 2 && banded && d.bandRotations < BAND_SETTLE_ROTATIONS;
+  setClass($("convHint"), "hint" + (waiting || early ? " attn" : ""));
+  $("convHint").textContent = sharing < 2
     ? "one pool — all work goes here, so there is nothing to compare"
-    : sig
-      ? ("±1σ = " + sig.toFixed(2) + " pts — the ranges narrow as "
-         + "rotations accumulate, and the axis zooms with it")
-      : ("no ranges yet — they appear once every pool has had a turn · "
-         + d.rotations + " of " + d.pools.length + " rotations");
-  // Spelled out in the legend as well as on the marks, because the width of
-  // the band is the number that tells you how much this section currently
-  // knows -- and it is the first thing to check when a colour looks wrong.
-  $("legendVals").textContent = sig
-    ? ("1\u03c3 = \u00b1" + sig.toFixed(2) + " pts \u00b7 \u00b1"
-       + ths(d.totalThs * sig / 100) + " TH/s \u00b7 axis "
-       + thsOf(lo) + "\u2013" + thsOf(hi) + " TH/s")
-    : "";
+    : !banded
+      ? "no ranges yet — they appear with the first shares"
+      : early
+        ? ("ranges still settling — expect them to swing · "
+           + d.bandRotations + " of " + BAND_SETTLE_ROTATIONS + " rotations")
+        : ("±1σ up to " + sig.toFixed(2) + " pts — the ranges narrow as "
+           + "rotations accumulate");
+
+  // A few sigma either side of target, widened to keep the furthest pool in frame.
+  var sigmaWindow = 3.2;
+  d.pools.forEach(function (p) {
+    if (p.sigmaPct) sigmaWindow = Math.max(sigmaWindow, Math.abs(p.sigmas) * 1.15);
+  });
+
+  var head = el("div", "chead");
+  head.appendChild(el("div"));
+  if (showOverall) {
+    var overallTitle = el("div", "ctitle", "Overall");
+    overallTitle.dataset.markid = "overall:title";
+markOf(overallTitle, "<p>Every pool on one fixed scale, from zero to your total "
+      + "hashrate, so bars can be compared with each other.</p>" + OVERALL_RED_NOTE);
+    head.appendChild(overallTitle);
+  }
+  if (showTarget) head.appendChild(el("div", "ctitle", "On target"));
+  head.appendChild(el("div"));
+  box.appendChild(head);
 
   d.pools.forEach(function (p) {
     var row = el("div", "crow");
-    row.appendChild(el("div", "cname", p.solo ? SOLO_TITLE : p.name));
+    row.appendChild(el("div", "cname" + (p.solo ? " soloname" : ""), p.name));
 
-    var bar = el("div", "bar");
     var g = grade(p);
-    var evenThs = p.expectedThs;
-    var sigThs = d.totalThs * p.sigmaPct / 100;
-
-    // Zones first, so everything else paints over them. Drawn as a run of
-    // adjacent spans across the whole scale rather than as marks at the
-    // boundaries: the question this chart answers is "which region is the bar
-    // in", and a region is a thing you can see the edges of.
-    if (p.sigmaPct) {
-      var edges = [
-        [lo,                               p.expectedPct - 2 * p.sigmaPct, "bad"],
-        [p.expectedPct - 2 * p.sigmaPct,   p.expectedPct - p.sigmaPct,     "warn"],
-        [p.expectedPct - p.sigmaPct,       p.expectedPct + p.sigmaPct,     "ok"],
-        [p.expectedPct + p.sigmaPct,       p.expectedPct + 2 * p.sigmaPct, "warn"],
-        [p.expectedPct + 2 * p.sigmaPct,   hi,                             "bad"]
-      ];
-      edges.forEach(function (e) {
-        var a = pct(e[0]), b = pct(e[1]);
-        if (b <= a) return;
-        var z = el("div", "zone " + e[2]);
-        z.style.left = a + "%";
-        z.style.width = (b - a) + "%";
-        z.dataset.markid = p.name + ":zone" + e[2] + e[0].toFixed(2);
-markOf(z, zoneHelp(e[2], p, evenThs, sigThs));
-        bar.appendChild(z);
-      });
-    }
-
-    var got = el("div", "got" + (g === "none" ? "" : " " + g));
-    got.style.width = pct(p.sharePct) + "%";
-    got.dataset.markid = p.name + ":got";
-markOf(got, "<p><b>" + ths(p.ths) + " TH/s</b> \u2014 this pool's share of everything "
-      + "switchyard has placed so far, <span class=\"k\">"
-      + p.sharePct.toFixed(2) + "%</span> of the total.</p>"
-      + "<p>Deliberately uncoloured. The zone its tip lands in is the verdict; "
-      + "colouring the bar as well would say the same thing twice and hide how "
-      + "much room is left before the next boundary.</p>"
-      + "<p>The axis starts at <span class=\"k\">" + lo.toFixed(1) + "%</span>, "
-      + "not at zero \u2014 a standard deviation here is a couple of points "
-      + "against an even split of " + even.toFixed(1) + "%, so a scale from zero "
-      + "would squeeze every zone into the last tenth of the bar.</p>");
-    bar.appendChild(got);
-
-    var exp = el("div", "exp");
-    exp.style.left = pct(p.expectedPct) + "%";
-    exp.dataset.markid = p.name + ":even";
-markOf(exp, "<p><b>Even split</b> <span class=\"k\">" + p.expectedPct.toFixed(2) + "% \u00b7 "
-      + ths(evenThs) + " TH/s</span></p>"
-      + "<p>Where this pool would sit if the rotation were perfect and luck did "
-      + "not exist. It is a landmark, not a target: nothing is wrong with "
-      + "sitting off it, which is what the green zone either side is for.</p>");
-    bar.appendChild(exp);
-    row.appendChild(bar);
+    if (showOverall) row.appendChild(overallBar(p, g));
+    if (showTarget) row.appendChild(onTargetBar(p, g, sigmaWindow));
 
     var n = el("div", "cnum");
-    n.appendChild(el("b", null, ths(p.ths) + " TH/s"));
-    n.appendChild(document.createTextNode(" of " + ths(p.expectedThs) + " \u00b7 "));
+    n.appendChild(el("b", g === "none" ? null : g, ths(p.ths) + " TH/s"));
+    n.appendChild(document.createTextNode(" of "));
+    n.appendChild(el("span", "ctarget", ths(p.expectedThs)));
+    n.appendChild(document.createTextNode(" · "));
     var dev = p.sharePct - p.expectedPct;
     var dv = el("span", "dev " + g, p.sigmaPct
-      ? ((p.sigmas >= 0 ? "+" : "\u2212") + Math.abs(p.sigmas).toFixed(1) + "\u03c3")
-      : d.pools.length < 2 ? "all of it" : "no ranges yet");
-    dv.title = (dev >= 0 ? "+" : "\u2212") + Math.abs(dev).toFixed(2) + " points from an even split"
-      + (p.sigmaPct ? ", against a \u00b1" + p.sigmaPct.toFixed(2) + " point band" : "");
+      ? ((p.sigmas >= 0 ? "+" : "−") + Math.abs(p.sigmas).toFixed(1) + "σ")
+      : p.expectedPct >= 100 ? "all of it"
+      : p.expectedPct === 0 ? "0% target"
+      : "no ranges yet");
+    dv.title = (dev >= 0 ? "+" : "−") + Math.abs(dev).toFixed(2) + " points from target"
+      + (p.sigmaPct ? ", against a ±" + p.sigmaPct.toFixed(2) + " point band" : "");
     n.appendChild(dv);
+    // What one sigma is worth on this row: the only place the on-target view
+    // says how far in it is zoomed, in the units the bars cannot carry.
+    if (showTarget && p.sigmaPct) {
+      n.appendChild(document.createTextNode(
+        " · 1σ = " + ths(d.totalThs * p.sigmaPct / 100) + " TH/s"));
+    }
     row.appendChild(n);
 
     box.appendChild(row);
   });
 
-  // The axis, spelled out. Only when there is a band -- without one the scale
-  // is a plain 0-to-max and says nothing a reader needs.
-  if (sig > 0) {
+  // The axes, spelled out once under all the rows.
+  if (d.totalThs > 0) {
     var sc = el("div", "cscale");
     sc.appendChild(el("div"));
-    var track = el("div", "track");
-    track.appendChild(el("span", "t lo", thsOf(lo)));
-
-    // One label per band boundary, so every colour edge above has the rate
-    // that crosses it written underneath.
-    //
-    // NONE OF THESE SIT AT A FIXED FRACTION OF THE AXIS. The window is even
-    // +/- 3.2 sigma, which looks symmetric and usually is -- but it is
-    // clamped at zero, because a share of total work cannot be negative, and
-    // widened when a pool wanders past it. Early on sigma is enormous, the
-    // left arm hits the clamp, and the window goes lopsided: 0% to 90.6%
-    // around an even split of 33.3%, which sits at 37% of the axis rather
-    // than 50%. A hardcoded 50% once put the label a fifth of the axis away
-    // from the tick it names. pct() already maps a value to its position;
-    // use it for all of them.
-    //
-    // A breakpoint the clamp pushed outside the window, or one that would
-    // print on top of its neighbour, is dropped rather than drawn wrong.
-    var placed = [0, 100];
-    [[even - 2 * sig, "s2"], [even - sig, "s1"], [even, "mid"],
-     [even + sig, "s1"], [even + 2 * sig, "s2"]].forEach(function (b) {
-      var v = b[0], x = pct(v);
-      if (v <= lo || v >= hi) return;
-      for (var i = 0; i < placed.length; i++) {
-        if (Math.abs(placed[i] - x) < 5) return;
+    if (showOverall) {
+      var overallTrack = el("div", "track");
+      overallTrack.appendChild(el("span", "t lo", "0"));
+      overallTrack.appendChild(el("span", "t hi", ths(d.totalThs) + " TH/s"));
+      sc.appendChild(overallTrack);
+    }
+    if (showTarget) {
+      var targetTrack = el("div", "track");
+      if (banded) {
+        // A breakpoint that would print on top of its neighbour is dropped rather
+        // than drawn wrong: a pool far off target widens the window and pulls the
+        // labels toward the centre. The target goes first, so it is never the one.
+        var placed = [];
+        [[0, "T", "mid"], [-1, "−1σ", "s1"], [1, "+1σ", "s1"],
+         [-2, "−2σ", "s2"], [2, "+2σ", "s2"]].forEach(function (b) {
+          var x = 50 + (b[0] / sigmaWindow) * 50;
+          for (var i = 0; i < placed.length; i++) {
+            if (Math.abs(placed[i] - x) < 5) return;
+          }
+          placed.push(x);
+          var t = el("span", "t " + b[2], b[1]);
+          t.style.left = x + "%";
+          targetTrack.appendChild(t);
+        });
       }
-      placed.push(x);
-      var t = el("span", "t " + b[1], thsOf(v));
-      t.style.left = x + "%";
-      track.appendChild(t);
-    });
-
-    track.appendChild(el("span", "t hi", thsOf(hi)));
-    sc.appendChild(track);
-    // The legend above already carries the sigma, its TH/s equivalent and the
-    // span, so this column stays empty rather than saying it again. It also
-    // used to report the span as "+/- (hi - even)", which is only true while
-    // the window is symmetric -- the very case the clamp breaks.
+      sc.appendChild(targetTrack);
+    }
     sc.appendChild(el("div"));
     box.appendChild(sc);
   }
@@ -2860,6 +3149,8 @@ function renderOutbound(d) {
 function renderTable(d) {
   var body = $("tbody");
   body.textContent = "";
+  var soloPool = d.pools.filter(function (p) { return p.solo; })[0];
+  var isSolo = function (name) { return !!soloPool && name === soloPool.name; };
   d.rigs.forEach(function (r) {
     var head = document.createElement("tr");
     head.className = "rhead";
@@ -2867,10 +3158,15 @@ function renderTable(d) {
     c.colSpan = 8;
     c.appendChild(document.createTextNode(r.name + "  "));
     var rst = rigState(r);
-    c.appendChild(el("span", rst === "live" ? "on" : rst === "arriving" ? "pending" : "off",
-      r.connected
-        ? "→ " + (r.boundTo || "unbound") + " · " + ths(r.nowThs) + " TH/s · " + r.listen
-        : (rst === "arriving" ? waitLabel(r) : "miner not connected") + " · " + r.listen));
+    var rstate = el("span", rst === "live" ? "on" : rst === "arriving" ? "pending" : "off");
+    if (r.connected) {
+      rstate.appendChild(document.createTextNode("→ "));
+      rstate.appendChild(poolNameNode(r.boundTo || "unbound", isSolo(r.boundTo)));
+      rstate.appendChild(document.createTextNode(" · " + ths(r.nowThs) + " TH/s · " + r.listen));
+    } else {
+      rstate.textContent = (rst === "arriving" ? waitLabel(r) : "miner not connected") + " · " + r.listen;
+    }
+    c.appendChild(rstate);
     head.appendChild(c);
     body.appendChild(head);
 
@@ -2879,7 +3175,7 @@ function renderTable(d) {
       if (g.pool === r.boundTo) tr.className = "bound";
       var c0 = document.createElement("td");
       c0.appendChild(el("span", "sdot " + (g.ready ? "up" : "down")));
-      c0.appendChild(document.createTextNode(g.pool));
+      c0.appendChild(poolNameNode(g.pool, isSolo(g.pool)));
       tr.appendChild(c0);
       tr.appendChild(el("td", null,
         g.pool === r.boundTo ? "carrying this rig" : (g.ready ? "held open, idle" : "reconnecting")));
@@ -2905,13 +3201,13 @@ function renderPools(d) {
 
     var c0 = document.createElement("td");
     c0.appendChild(el("span", "sdot " + (p.ready ? "up" : "down")));
-    // Solo-ness comes from the flag; the name the row is keyed on is only a
-    // label, never a marker.
-    c0.appendChild(document.createTextNode(p.solo ? SOLO_TITLE : p.name));
+    c0.appendChild(poolNameNode(p.name, p.solo));
     tr.appendChild(c0);
 
     var c1 = document.createElement("td");
+    var parked = p.expectedPct === 0;
     if (p.occupants.length) c1.textContent = p.occupants.join(", ");
+    else if (parked) c1.appendChild(el("span", "parked", "set to 0%"));
     else c1.appendChild(el("span", "sentinel", "no rig this block"));
     tr.appendChild(c1);
 
@@ -2919,13 +3215,23 @@ function renderPools(d) {
     tr.appendChild(el("td", "num", num(p.accepted)));
     tr.appendChild(el("td", "num", num(p.rejected)));
 
-    // A gap much longer than the dwell ceiling means we should have rotated
-    // back by now and have not. That is the only case worth colouring; a pool
-    // simply waiting its turn is the scheme working.
+    // Coloured only when a rig should have come back by now and has not; a pool
+    // simply waiting is the scheme working. A rig returns to a pool about every
+    // 1/target rotations, so how long is too long depends on the target: half an
+    // hour without a rig is ordinary at 10% and worth a look at 40%. One ceiling
+    // per 1/target rotations stays quiet on a healthy run, with the floor there
+    // for pools with a large target, whose gaps are short and uneven.
+    //
+    // A pool set to 0% is not waiting for anything: never having seen a share is
+    // exactly what was asked for, so it is neither overdue nor "not yet visited".
+    // Its limit comes out infinite, so it never colours.
     var s = secs(p.lastShare, d.now);
-    if (isFinite(s)) { anySeen = true; if (s > worst) worst = s; } else { never.push(p.name); }
-    var lastCell = el("td", "num", ago(p.lastShare, d.now));
-    if (s > (d.maxDwellSeconds || 900) * 1.5) lastCell.className = "num stale";
+    var idleByDesign = parked && !isFinite(s);
+    if (isFinite(s)) { anySeen = true; if (s > worst) worst = s; }
+    else if (!parked) { never.push(p.name); }
+    var lastCell = el("td", "num", idleByDesign ? "—" : ago(p.lastShare, d.now));
+    var ceiling = d.maxDwellSeconds || 900;
+    if (s > Math.max(ceiling * 1.5, ceiling / (p.expectedPct / 100))) lastCell.className = "num stale";
     tr.appendChild(lastCell);
 
     body.appendChild(tr);
@@ -2946,10 +3252,6 @@ function renderPools(d) {
 
 // ---- main ------------------------------------------------------------------
 var latest = null;
-
-// setupPrompted stops the first-run form reopening itself every two seconds
-// if the operator closes it to go and look something up.
-var setupPrompted = false;
 
 function render(d) {
   latest = d;
@@ -3000,18 +3302,16 @@ function render(d) {
     } else {
       $("setupGateTitle").textContent = "Nothing configured yet";
       $("setupGateLede").textContent = "Switchyard moves miners between DATUM "
-        + "gateways so each pool gets an even share of your work. It needs at "
-        + "least one rig and one pool before it can do anything.";
+        + "gateways so each pool gets its share of your work — an even split "
+        + "by default, or a custom one you set. It needs at least one rig and one "
+        + "pool before it can do anything.";
     }
   }
-  if (!ready) {
-    if (!setupPrompted) {
-      setupPrompted = true;
-      openConfig(true);
-    }
-    return;
-  }
-  setupPrompted = false;
+  // Do NOT open the setup form automatically. The gate shows what is missing
+  // and its Set up button nudges; opening the editor and seeding it on the
+  // operator's behalf is exactly the hand-holding this screen is meant to
+  // replace with a deliberate first step they take themselves.
+  if (!ready) return;
 
   // MINERS RECONNECT ON THEIR OWN SCHEDULE, and this says so at the one moment
   // it matters.
@@ -3266,6 +3566,28 @@ function applyHeat(on) {
   });
 })();
 
+var CHART_KEY = "switchyard.chart";
+
+function applyChart(mode) {
+  chartView = mode;
+  var b = $("chartBtn");
+  b.textContent = "chart: " + (mode === "target" ? "on target" : mode);
+  b.className = "armed";
+  try { localStorage.setItem(CHART_KEY, mode); } catch (e) { /* private browsing */ }
+  if (latest) renderConv(latest);
+}
+
+(function initChart() {
+  var mode = "both";
+  try { mode = localStorage.getItem(CHART_KEY) || "both"; } catch (e) { /* private browsing */ }
+  var order = ["both", "overall", "target"];
+  if (order.indexOf(mode) < 0) mode = "both";
+  applyChart(mode);
+  $("chartBtn").addEventListener("click", function () {
+    applyChart(order[(order.indexOf(chartView) + 1) % order.length]);
+  });
+})();
+
 $("resetBtn").addEventListener("click", function () {
   var b = $("resetBtn");
   b.disabled = true;
@@ -3356,14 +3678,45 @@ $("resetConfirmBtn").addEventListener("click", async function () {
 // ---- config editor ----------------------------------------------------------
 //
 // One form for both jobs. First-run setup is this editor with a different
-// title and an empty pool and rig already seeded -- not a separate wizard,
-// because two forms writing the same file is exactly the kind of divergence
-// this whole feature was designed to avoid.
+// title and wording -- nothing is seeded; the empty states and the glowing Add
+// buttons guide the first step -- not a separate wizard, because two forms
+// writing the same file is exactly the kind of divergence this whole feature
+// was designed to avoid.
 //
 // The editor holds a WORKING COPY. Nothing touches the running system until
 // Save, which writes the file and asks the process to rebuild from it.
 var draft = null;
 var draftPath = "config.json";
+
+// The split editor's state. The split is ALWAYS live now -- there is no on/off
+// toggle. The bar simply defaults to an even split, and on save the split is
+// written out EXPLICITLY, even when even (being explicit is preferred -- see
+// splitPayload); a share-less config is still accepted and still means even,
+// but that is the fallback for old or hand-edited files, not what this tool
+// writes. The live working weights and locks live on the
+// pool objects as transient _w / _lock (floats, so dragging is smooth), and are
+// materialised into two-decimal `share` values on save. splitUI holds the DOM
+// references so a drag can update in place rather than re-rendering the form.
+var splitUI = null;
+// Bar fills. Hue varies by position; saturation and lightness are fixed in
+// switchyard's own register (matching --good / --landmark / --solo) so any
+// number of pools get distinct but on-theme colours with no palette to exhaust
+// and nothing garish. Position-based, not a hash of the name, so a pool keeps
+// its colour when renamed. The solo slot always takes --solo, so it reads as
+// the solo slot here exactly as it does in the pools list.
+var SPLIT_HUES = [168, 206, 136, 50, 326, 188, 102, 300];
+function splitColor(pool, i) {
+  return pool.solo ? "var(--solo)" : "hsl(" + SPLIT_HUES[i % SPLIT_HUES.length] + " 52% 64%)";
+}
+// fmtShare prints a share with up to two decimals and no trailing zeros, so the
+// bar and the inputs read "50", "33.33", "13.34" rather than "50.00".
+function fmtShare(v) { return String(Math.round(v * 100) / 100); }
+function splitLabel(pool, i) {
+  if (pool.solo) return "Solo";
+  if (pool.name) return pool.name;
+  if (pool.port) return (pool.host || "127.0.0.1") + ":" + pool.port;
+  return "Pool " + (i + 1);
+}
 
 function field(label, value, opts) {
   opts = opts || {};
@@ -3415,8 +3768,9 @@ function helpMarker(key) {
   return b;
 }
 
-function cardHead(title, onRemove) {
+function cardHead(title, onRemove, handle) {
   var head = el("div", "chead");
+  if (handle) head.appendChild(handle);
   head.appendChild(el("span", "idx", title));
   head.appendChild(el("span", "spacer"));
   if (onRemove) {
@@ -3426,6 +3780,107 @@ function cardHead(title, onRemove) {
     head.appendChild(rm);
   }
   return head;
+}
+
+// ---- reordering pools and rigs -------------------------------------------
+//
+// Order is not cosmetic: the order of draft.pools / draft.rigs is the order
+// switchyard writes to config.json, and that in turn is the order the split
+// bar, the flow diagram and the share-of-work breakdown all draw in. So letting
+// the operator reorder here is how they fix "OmegaPool keeps ending up at the
+// bottom when I want it in the middle" once and for all.
+//
+// Only the handle is draggable, never the card -- a draggable card would steal
+// text selection and focus from the inputs inside it. The handle carries a
+// whole-card drag image, and the card is the drop zone. Arrow keys on a focused
+// handle do the same move, so this works without a pointer too.
+var reorderDrag = null;
+
+function reorderHandle(kind, i) {
+  var h = el("div", "draghandle", "⋮⋮");
+  h.dataset.kind = kind;
+  h.dataset.idx = String(i);
+  h.tabIndex = 0;
+  h.setAttribute("role", "button");
+  h.setAttribute("aria-label", "Reorder this " + kind + " — drag, or use the arrow keys");
+  h.title = "Drag to reorder (or focus and press ↑ / ↓)";
+  return h;
+}
+
+function moveInArray(arr, from, to) {
+  if (from < 0 || from >= arr.length) return;
+  var item = arr.splice(from, 1)[0];
+  if (from < to) to--;
+  if (to < 0) to = 0;
+  if (to > arr.length) to = arr.length;
+  arr.splice(to, 0, item);
+}
+
+function clearDragMarkers() {
+  var els = document.querySelectorAll(".drop-before, .drop-after, .card.dragging");
+  for (var k = 0; k < els.length; k++) els[k].classList.remove("drop-before", "drop-after", "dragging");
+}
+
+// The DOM is rebuilt by renderConfigForm, so focus is restored by finding the
+// handle that now sits at the moved item's new index -- keeping keyboard reorder
+// continuous (hold a handle, tap Down repeatedly, it keeps moving).
+function focusHandle(kind, idx) {
+  var h = document.querySelector('.draghandle[data-kind="' + kind + '"][data-idx="' + idx + '"]');
+  if (h) h.focus();
+}
+
+function reorderList(kind) { return kind === "pool" ? draft.pools : draft.rigs; }
+
+function wireReorder(card, handle, kind, i) {
+  handle.draggable = true;
+  handle.addEventListener("dragstart", function (e) {
+    reorderDrag = { kind: kind, from: i };
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      try { e.dataTransfer.setData("text/plain", kind + ":" + i); } catch (_) { /* IE */ }
+      try { e.dataTransfer.setDragImage(card, 20, 16); } catch (_) { /* unsupported */ }
+    }
+    card.classList.add("dragging");
+  });
+  handle.addEventListener("dragend", function () { card.classList.remove("dragging"); clearDragMarkers(); reorderDrag = null; });
+
+  card.addEventListener("dragover", function (e) {
+    if (!reorderDrag || reorderDrag.kind !== kind) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    var rect = card.getBoundingClientRect();
+    var after = (e.clientY - rect.top) > rect.height / 2;
+    card.classList.toggle("drop-after", after);
+    card.classList.toggle("drop-before", !after);
+  });
+  card.addEventListener("dragleave", function () { card.classList.remove("drop-before", "drop-after"); });
+  card.addEventListener("drop", function (e) {
+    if (!reorderDrag || reorderDrag.kind !== kind) return;
+    e.preventDefault();
+    var rect = card.getBoundingClientRect();
+    var after = (e.clientY - rect.top) > rect.height / 2;
+    var from = reorderDrag.from, to = i + (after ? 1 : 0);
+    card.classList.remove("drop-before", "drop-after");
+    moveInArray(reorderList(kind), from, to);
+    var newIdx = from < to ? to - 1 : to;
+    reorderDrag = null; // the re-render removes this handle, so dragend may not fire
+    renderConfigForm();
+    focusHandle(kind, newIdx);
+  });
+
+  handle.addEventListener("keydown", function (e) {
+    var ni;
+    if (e.key === "ArrowUp") ni = i - 1;
+    else if (e.key === "ArrowDown") ni = i + 1;
+    else return;
+    e.preventDefault();
+    var list = reorderList(kind);
+    if (ni < 0 || ni >= list.length) return;
+    var item = list.splice(i, 1)[0];
+    list.splice(ni, 0, item);
+    renderConfigForm();
+    focusHandle(kind, ni);
+  });
 }
 
 // A listen address is stored in full but shown as a PORT, because a port is
@@ -3518,32 +3973,46 @@ function renderConfigForm() {
   rigs.appendChild(rigWrap);
   draft.rigs.forEach(function (rig, i) {
     var card = el("div", "card");
+    var rh = reorderHandle("rig", i);
     // Labelled by port, not by name. There is no name here to label it with:
     // a rig is a port, and its identity arrives from the hardware.
     card.appendChild(cardHead("Rig " + (i + 1), function () {
       draft.rigs.splice(i, 1);
       renderConfigForm();
-    }));
+    }, rh));
+    wireReorder(card, rh, "rig", i);
     var grid = el("div", "fgrid");
-    // The port is HANDED OUT, not requested.
+    // The port is SUGGESTED, then yours to change.
     //
     // Switchyard is the only party that knows which ports are free on this
-    // machine, so asking the operator to supply one is asking them to guess at
-    // something the software can simply check. It scans, it picks, it tells
-    // you -- read-only for the same reason the pool name is: there is one
-    // correct answer and it is not a matter of preference.
+    // machine, so the common path is to let it pick: Add rig calls suggestPort
+    // and the box opens already filled in, and most operators never touch it.
     //
-    // A hand-written config.json can still say whatever it likes; the file
-    // stays the source of truth, and whatever it says is what appears here.
+    // But the number is not sacred. Reordering rigs by drag leaves the ports
+    // out of sequence, and someone who cares which miner lands on which port
+    // wants to remap by hand -- so the field is editable. checkPort probes the
+    // server as they type: a port switchyard already holds for THIS rig reads
+    // "in use by this rig -- fine", a free one reads "available", and one taken
+    // by something else reads the bind error. A bad remap is caught here, and
+    // again on save, where the apply refuses a clash outright.
+    //
+    // The file stays the source of truth: a hand-written config.json can say
+    // whatever it likes, and whatever it says is what appears here.
     grid.appendChild(field("Port", listenDisplay(rig.listen), {
-      wide: true, help: "cfgRigListen", mono: true, readOnly: true,
-      big: true, placeholder: "assigned on save"
+      wide: true, help: "cfgRigListen", mono: true, big: true,
+      placeholder: "e.g. 23401",
+      hint: "Port this miner connects to. Edit to remap.",
+      onInput: function (v, input, hint) {
+        rig.listen = v.trim();
+        checkPort(v, input, hint);
+      }
     }));
 
     card.appendChild(grid);
     rigWrap.appendChild(card);
   });
-  var addRig = el("button", "btn tiny add", "Add rig");
+  // Glow while there are no rigs: on an empty setup this is the next step.
+  var addRig = el("button", "btn tiny add" + (draft.rigs.length ? "" : " nudge"), "Add rig");
   addRig.type = "button";
   addRig.addEventListener("click", async function () {
     draft.rigs.push({ listen: await suggestPort() });
@@ -3552,7 +4021,7 @@ function renderConfigForm() {
   var addRow = el("div", "addrow");
   addRow.appendChild(addRig);
   addRow.appendChild(el("span", "addnote",
-    "Assigns the next free port from 23401."));
+    "Suggests the next free port from 23401 — you can change it."));
   addRow.appendChild(helpMarker("cfgPortSuggest"));
   rigs.appendChild(addRow);
   body.appendChild(rigs);
@@ -3568,12 +4037,17 @@ function renderConfigForm() {
   }
   draft.pools.forEach(function (pool, i) {
     var card = el("div", pool.solo ? "card solo" : "card");
+    var ph = reorderHandle("pool", i);
     var head = cardHead(pool.solo ? "Solo gateway" : "Pool " + (i + 1), function () {
       draft.pools.splice(i, 1);
+      rescaleAfterRemove(); // rescale survivors to fill the bar, no gap
       renderConfigForm();
-    });
-    if (pool.solo) head.insertBefore(el("span", "solobadge", "SOLO"), head.children[1]);
+    }, ph);
+    // Before the spacer, so the badge sits just after the title regardless of
+    // the reorder handle now occupying the first slot.
+    if (pool.solo) head.insertBefore(el("span", "solobadge", "SOLO"), head.querySelector(".spacer"));
     card.appendChild(head);
+    wireReorder(card, ph, "pool", i);
     var grid = el("div", "fgrid");
 
     var nameField, nameInput, statusHint, stratumHint;
@@ -3666,6 +4140,9 @@ function renderConfigForm() {
         verdict(statusHint, "Status page", false, String(e));
         verdict(stratumHint, "Stratum port", false, "not checked");
       }
+      // A fetched (or cleared) name changes what the split bar should call this
+      // pool, so reflect it there live rather than leaving a stale "Pool N".
+      if (splitUI) refreshSplitBar();
     }
 
     // One shape for every result line: what was checked, then how it went.
@@ -3745,11 +4222,16 @@ function renderConfigForm() {
     // behind it -- and a save would then write that stale label back to disk.
     if (pool.statusPort) fetchTag(true);
   });
+  // Both pool buttons glow while there are no pools -- either one is a valid
+  // first step (an ordinary gateway, or the solo slot).
   var poolAdds = el("div", "addrow");
-  var addPool = el("button", "btn tiny add", "Add pool");
+  var noPools = !draft.pools.length;
+  var addPool = el("button", "btn tiny add" + (noPools ? " nudge" : ""), "Add pool");
   addPool.type = "button";
   addPool.addEventListener("click", function () {
-    draft.pools.push({ host: "127.0.0.1" });
+    var p = { host: "127.0.0.1" };
+    draft.pools.push(p);
+    addPoolWeight(p); // even slice to the new pool, keep the others' ratios
     renderConfigForm();
   });
   poolAdds.appendChild(addPool);
@@ -3758,18 +4240,23 @@ function renderConfigForm() {
   // button says so by switching off -- rather than letting a second one be
   // added and refused on save.
   var hasSolo = draft.pools.some(function (p) { return p.solo; });
-  var addSolo = el("button", "btn tiny add", "Add solo gateway");
+  var addSolo = el("button", "btn tiny add" + (noPools ? " nudge" : ""), "Add solo gateway");
   addSolo.type = "button";
   addSolo.disabled = hasSolo;
   if (hasSolo) addSolo.title = "Only one solo gateway. Remove the existing one to add another.";
   addSolo.addEventListener("click", function () {
-    draft.pools.push({ host: "127.0.0.1", solo: true });
+    var p = { host: "127.0.0.1", solo: true };
+    draft.pools.push(p);
+    addPoolWeight(p); // even slice to the new solo slot, keep the others' ratios
     renderConfigForm();
   });
   poolAdds.appendChild(addSolo);
   poolAdds.appendChild(helpMarker("cfgSoloAdd"));
   pools.appendChild(poolAdds);
   body.appendChild(pools);
+
+  // The split tool reads the pools just built, so it comes straight after them.
+  renderSplitControl(body);
 
   // ---- this browser, last ----
   // Display preferences, not configuration. They live here because this is
@@ -3885,7 +4372,389 @@ function checkPort(value, input, hint) {
   }, 350);
 }
 
-async function openConfig(firstRun) {
+// ensureWeights makes sure every pool has a working weight and a lock flag. If
+// any weight is missing it seeds an even split across all pools (the fresh case
+// -- a config with no shares, which is still the default). It runs on every
+// render of the tool as a safety net; add and remove do their own proportional
+// maths BEFORE re-rendering, so by the time this sees them nothing is missing
+// and it leaves a deliberate split alone.
+function ensureWeights() {
+  var n = draft.pools.length;
+  var missing = draft.pools.some(function (p) { return typeof p._w !== "number"; });
+  if (missing || n === 0) {
+    var even = n ? 100 / n : 0;
+    draft.pools.forEach(function (p) { p._w = even; });
+  }
+  draft.pools.forEach(function (p) { if (typeof p._lock !== "boolean") p._lock = false; });
+}
+
+// addPoolWeight places a newly added pool in the split without flattening an
+// existing one. The new pool gets an even 1/n slice; the OTHER unlocked pools
+// are rescaled to keep their ratios to each other within what is left, and
+// locked pools keep their shares untouched. So 20/80 + a new pool becomes
+// roughly 13.33 / 53.33 / 33.33, not 33/33/33.
+function addPoolWeight(pool) {
+  var pools = draft.pools, n = pools.length;
+  pool._lock = false;
+  var lockedSum = 0, others = [];
+  pools.forEach(function (p) {
+    if (p === pool) return;
+    if (p._lock) lockedSum += (p._w || 0); else others.push(p);
+  });
+  var budget = Math.max(0, 100 - lockedSum);
+  var give = Math.min(100 / n, budget);
+  pool._w = give;
+  var remaining = budget - give, sum = 0;
+  others.forEach(function (p) { sum += (p._w || 0); });
+  if (!others.length) { /* only locked pools besides this one */ }
+  else if (sum <= 0) others.forEach(function (p) { p._w = remaining / others.length; });
+  else others.forEach(function (p) { p._w = remaining * ((p._w || 0) / sum); });
+}
+
+// rescaleAfterRemove fills the gap a removed pool leaves. The remaining unlocked
+// pools are rescaled to total 100 again at their current ratios, so the bar
+// stays whole (no dark gap where the pool was) and the survivors keep their
+// shape relative to each other. The mirror of addPoolWeight.
+function rescaleAfterRemove() {
+  var pools = draft.pools;
+  if (!pools.length) return;
+  var lockedSum = 0, unlocked = [];
+  pools.forEach(function (p) { if (p._lock) lockedSum += (p._w || 0); else unlocked.push(p); });
+  if (!unlocked.length) return;
+  var budget = Math.max(0, 100 - lockedSum), sum = 0;
+  unlocked.forEach(function (p) { sum += (p._w || 0); });
+  if (sum <= 0) unlocked.forEach(function (p) { p._w = budget / unlocked.length; });
+  else unlocked.forEach(function (p) { p._w = budget * ((p._w || 0) / sum); });
+}
+
+// redistribute is the one operation behind every edit: "pool ci now wants value
+// v; rescale the other unlocked pools so the total stays 100." Dragging and
+// typing both go through it, so they can never disagree. Locked pools never
+// move, and the other unlocked pools keep their ratio to each other -- which is
+// the property that lets you shift one pool without disturbing the balance of
+// the rest.
+function redistribute(ci, raw) {
+  var pools = draft.pools;
+  if (pools[ci]._lock) return;
+  var lockedSum = 0;
+  pools.forEach(function (p) { if (p._lock) lockedSum += p._w; });
+  var budget = 100 - lockedSum;
+  var others = [];
+  pools.forEach(function (p, i) { if (i !== ci && !p._lock) others.push(i); });
+  var nv = Math.max(0, Math.min(raw, budget));
+  if (others.length === 0) nv = budget; // the only free pool takes the whole budget
+  pools[ci]._w = nv;
+  var remaining = budget - nv;
+  var sumOthers = 0;
+  others.forEach(function (i) { sumOthers += pools[i]._w; });
+  if (sumOthers <= 0) {
+    others.forEach(function (i) { pools[i]._w = remaining / others.length; });
+  } else {
+    others.forEach(function (i) { pools[i]._w = remaining * (pools[i]._w / sumOthers); });
+  }
+  refreshSplitBar();
+}
+
+// equalizeSplit splits the UNLOCKED budget evenly among the unlocked pools; a
+// locked pool keeps its value and the others share what is left.
+function equalizeSplit() {
+  var pools = draft.pools, lockedSum = 0, unlocked = [];
+  pools.forEach(function (p, i) { if (p._lock) lockedSum += p._w; else unlocked.push(i); });
+  if (!unlocked.length) return;
+  var share = (100 - lockedSum) / unlocked.length;
+  unlocked.forEach(function (i) { pools[i]._w = share; });
+  refreshSplitBar();
+}
+
+// roundShares turns the float weights into two-decimal shares that still total
+// exactly 100, by the largest-remainder method worked in hundredths of a
+// percent: floor every hundredth, then hand the leftover hundredths out. Saving
+// shares that did not sum to 100 would be rejected by validate on the far side.
+//
+// Two subtleties, both visible to the operator:
+//   * The hundredths are rounded to kill floating-point ULP noise before the
+//     fractional parts are compared. Without it, a locked pool holding 100/3
+//     carries a fraction one ULP larger than the unlocked pools recomputed from
+//     the budget, so the leftover cent jumped to whichever pool happened to be
+//     locked -- the exact "the 33.34 moved to the locked pool" oddity.
+//   * Ties are broken toward UNLOCKED pools first, then lowest index, so a
+//     locked pool's displayed value stays put rather than absorbing a cent that
+//     the operator cannot then adjust.
+function roundShares(weights, locked) {
+  locked = locked || [];
+  var units = weights.map(function (w) { return Math.round(w * 1e8) / 1e6; }); // hundredths, ULP-trimmed
+  var floors = units.map(function (u) { return Math.floor(u); });
+  var used = floors.reduce(function (a, b) { return a + b; }, 0);
+  var rem = Math.round(10000 - used);
+  var order = units.map(function (u, i) { return { i: i, frac: u - Math.floor(u), free: !locked[i] }; })
+    .sort(function (a, b) {
+      if (Math.abs(b.frac - a.frac) > 1e-9) return b.frac - a.frac; // biggest remainder first
+      if (a.free !== b.free) return a.free ? -1 : 1;                // then prefer unlocked
+      return a.i - b.i;                                             // then lowest index
+    });
+  for (var k = 0; rem > 0 && order.length; k++, rem--) floors[order[k % order.length].i]++;
+  return floors.map(function (h) { return h / 100; });
+}
+
+// renderSplitControl is the whole tool: a note and the bar. There is no on/off
+// toggle -- the split is always live and simply defaults to even. Appended to
+// the pools section of the editor.
+function renderSplitControl(parent) {
+  ensureWeights();
+  var grp = el("div", "group");
+  grp.id = "splitGroup";
+  var h = el("h3", null, "Hashrate split");
+  h.appendChild(helpMarker("cfgSplit"));
+  grp.appendChild(h);
+  grp.appendChild(el("p", "note",
+    "Every pool gets a share of the rotation over time — an even split by "
+    + "default. Drag a handle or type a percent to weight them; the other "
+    + "unlocked pools rescale to keep their split with each other, so you can "
+    + "shift one pool without disturbing the balance among the rest. Lock any "
+    + "you want to hold fixed while you adjust the others."));
+
+  if (draft.pools.length < 2) {
+    grp.appendChild(el("div", "empty", "Add at least two pools to adjust the split."));
+    splitUI = null;
+    parent.appendChild(grp);
+    return;
+  }
+
+  grp.appendChild(buildSplitBar());
+  parent.appendChild(grp);
+}
+
+// buildSplitBar constructs the bar, the grip track, the Equalize action, and
+// the per-pool rows once, recording element references in splitUI so that a
+// drag or a typed value updates them in place (refreshSplitBar) instead of
+// rebuilding the form and losing focus mid-edit.
+function buildSplitBar() {
+  var pools = draft.pools;
+  var wrap = el("div");
+  splitUI = { bar: null, segs: [], seglocks: [], grips: [], inputs: [], rows: [], names: [], lockBtns: [] };
+
+  var bar = el("div", "splitbar");
+  splitUI.bar = bar;
+  var track = el("div", "splittrack");
+
+  pools.forEach(function (pool, i) {
+    var label = splitLabel(pool, i);
+    var color = splitColor(pool, i);
+
+    var seg = el("div", "splitseg" + (pool.solo ? " solo" : ""));
+    // backgroundColor, NOT the background shorthand: the shorthand would write
+    // background-image:none inline and kill the .locked hatch, which is a CSS
+    // background-image. This one longhand leaves that free to layer on top.
+    seg.style.backgroundColor = color;
+    // A solo-slot badge, so the solo segment is marked as such on the bar the
+    // same way the pools list marks it -- not just "the purple one".
+    if (pool.solo) seg.appendChild(el("span", "segsolo", "SOLO"));
+    seg.appendChild(el("span", "slabel"));
+    // A lock glyph that shows on the segment itself when the pool is locked, so
+    // the locked state reads from the bar and not only from the row below it.
+    var slock = el("span", "seglock", "🔒");
+    seg.appendChild(slock);
+    splitUI.seglocks.push(slock);
+    bar.appendChild(seg);
+    splitUI.segs.push(seg);
+
+    var grip = el("div", "splitgrip");
+    grip.textContent = "⋮⋮";
+    grip.tabIndex = 0;
+    grip.setAttribute("role", "slider");
+    grip.setAttribute("aria-label", "Share for " + label);
+    grip.setAttribute("aria-valuemin", "0");
+    grip.setAttribute("aria-valuemax", "100");
+    wireGrip(grip, i, bar);
+    track.appendChild(grip);
+    splitUI.grips.push(grip);
+  });
+
+  wrap.appendChild(bar);
+  wrap.appendChild(track);
+
+  var actions = el("div", "splitactions");
+  var eq = el("button", "btn tiny", "Equalize");
+  eq.type = "button";
+  eq.addEventListener("click", equalizeSplit);
+  actions.appendChild(eq);
+  wrap.appendChild(actions);
+
+  var rows = el("div", "splitrows");
+  pools.forEach(function (pool, i) {
+    var r = el("div", "splitrow" + (pool.solo ? " solo" : ""));
+    var lock = el("button", "splitlock");
+    lock.type = "button";
+    lock.addEventListener("click", function () {
+      pool._lock = !pool._lock;
+      refreshSplitBar();
+    });
+    r.appendChild(lock);
+
+    var sw = el("span", "splitswatch");
+    sw.style.background = splitColor(pool, i);
+    r.appendChild(sw);
+
+    var nm = el("span", "splitname", splitLabel(pool, i));
+    r.appendChild(nm);
+    splitUI.names.push(nm);
+
+    var inp = el("input", "splitnum");
+    inp.type = "number";
+    inp.min = "0"; inp.max = "100"; inp.step = "0.01";
+    // min and max only govern the spinner and form validation: a number input
+    // still accepts a typed or pasted -5. So the sign and exponent keys are
+    // refused outright, and anything that gets in regardless is corrected below.
+    inp.addEventListener("keydown", function (e) {
+      if (e.key === "-" || e.key === "+" || e.key === "e" || e.key === "E") e.preventDefault();
+    });
+    inp.addEventListener("input", function () {
+      var v = parseFloat(inp.value);
+      if (isNaN(v)) return;
+      redistribute(i, v);
+      // redistribute clamps to 0..budget, but refreshSplitBar leaves the focused
+      // box alone so typing is not interrupted -- which would leave -5 on screen
+      // over a weight of 0. Only a clamped value is rewritten, so "33." survives.
+      var w = draft.pools[i]._w;
+      if (Math.abs(w - v) > 1e-9) inp.value = fmtShare(w);
+    });
+    // Leaving the box settles it: an emptied box gets its value back, and a long
+    // decimal shows the two places that will actually be saved.
+    inp.addEventListener("blur", refreshSplitBar);
+    r.appendChild(inp);
+    r.appendChild(el("span", "splitpct", "%"));
+    splitUI.inputs.push(inp);
+    splitUI.lockBtns.push(lock);
+    rows.appendChild(r);
+    splitUI.rows.push(r);
+  });
+  wrap.appendChild(rows);
+
+  refreshSplitBar();
+  return wrap;
+}
+
+// wireGrip gives one grip pointer-drag and keyboard control. The drag measures
+// from the START of the gesture (startWeight + total delta) rather than summing
+// per-move steps, which avoids accumulated rounding drift and behaves cleanly
+// when the pointer runs past the end of the bar and comes back.
+function wireGrip(grip, idx, bar) {
+  grip.addEventListener("pointerdown", function (ev) {
+    if (gripInert(idx)) return;
+    ev.preventDefault();
+    var barW = bar.getBoundingClientRect().width || 1;
+    var startX = ev.clientX;
+    var startW = draft.pools[idx]._w;
+    try { grip.setPointerCapture(ev.pointerId); } catch (e) { /* older engines */ }
+    function move(e) {
+      var dPct = (e.clientX - startX) / barW * 100;
+      redistribute(idx, startW + dPct);
+    }
+    function up() {
+      try { grip.releasePointerCapture(ev.pointerId); } catch (e) { /* no-op */ }
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", up);
+      grip.removeEventListener("pointercancel", up);
+    }
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up);
+    grip.addEventListener("pointercancel", up); // OS-cancelled touch is a release
+  });
+  grip.addEventListener("keydown", function (e) {
+    if (gripInert(idx)) return;
+    var step = e.shiftKey ? 10 : 1;
+    if (e.key === "ArrowLeft" || e.key === "ArrowDown") { redistribute(idx, draft.pools[idx]._w - step); e.preventDefault(); }
+    else if (e.key === "ArrowRight" || e.key === "ArrowUp") { redistribute(idx, draft.pools[idx]._w + step); e.preventDefault(); }
+  });
+}
+
+// A grip is inert when its pool is locked OR when it is the only unlocked pool
+// left: with everything else fixed there is no room to move it into, so its
+// value is forced and it should neither drag nor type. refreshSplitBar shows
+// that state; this enforces it.
+function gripInert(idx) {
+  var pools = draft.pools;
+  if (pools[idx]._lock) return true;
+  var unlocked = pools.filter(function (p) { return !p._lock; }).length;
+  return unlocked <= 1;
+}
+
+// refreshSplitBar reflects the current weights and locks into the DOM without
+// rebuilding it: segment widths and labels, grip positions, the two-decimal
+// values in the inputs, lock glyphs, and every locked-state visual. The values
+// it shows are the same largest-remainder shares that will be saved, so what
+// the operator reads is what lands in config.json.
+function refreshSplitBar() {
+  if (!splitUI) return;
+  var pools = draft.pools;
+  var shares = roundShares(
+    pools.map(function (p) { return p._w || 0; }),
+    pools.map(function (p) { return !!p._lock; }));
+  var unlocked = pools.filter(function (p) { return !p._lock; }).length;
+  var acc = 0;
+  pools.forEach(function (p, i) {
+    var w = p._w || 0;
+    // The label is recomputed every refresh, not cached at build time, so a
+    // name that arrives later (the gateway's coinbase tag, fetched async once a
+    // host and status port are filled in) replaces "Pool N" on the bar live.
+    var label = splitLabel(p, i);
+    var inert = !p._lock && unlocked <= 1; // sole free pool: nothing to change
+    var seg = splitUI.segs[i];
+    seg.style.width = w.toFixed(4) + "%";
+    seg.classList.toggle("locked", !!p._lock);
+    // Hide the label on a sliver too narrow to hold it.
+    seg.querySelector(".slabel").textContent = w >= 6 ? (label + " " + fmtShare(shares[i]) + "%") : "";
+    splitUI.seglocks[i].style.display = p._lock ? "" : "none";
+
+    var grip = splitUI.grips[i];
+    grip.style.left = (acc + w / 2).toFixed(4) + "%";
+    grip.classList.toggle("locked", !!p._lock || inert);
+    grip.setAttribute("aria-valuenow", fmtShare(shares[i]));
+    grip.setAttribute("aria-label", "Share for " + label);
+    acc += w;
+
+    var inp = splitUI.inputs[i];
+    if (document.activeElement !== inp) inp.value = fmtShare(shares[i]);
+    inp.disabled = !!p._lock || inert;
+
+    splitUI.names[i].textContent = label;
+    splitUI.rows[i].classList.toggle("locked", !!p._lock);
+    var lock = splitUI.lockBtns[i];
+    lock.textContent = p._lock ? "🔒" : "🔓";
+    lock.style.borderColor = p._lock ? splitColor(p, i) : "";
+    lock.setAttribute("aria-label", (p._lock ? "Unlock " : "Lock ") + label);
+  });
+}
+
+// splitPayload builds the config to POST: a copy of the draft with the editor's
+// transient _w / _lock stripped and two-decimal shares materialised on every
+// pool. The draft itself is left untouched, so a rejected save does not wipe the
+// weights the operator is still editing.
+//
+// The split is written EXPLICITLY, even when it is even. Being explicit is
+// preferred: the file then always says exactly what it is doing rather than
+// relying on the absence of shares to mean "even". A share-less config is still
+// accepted and still means even -- that is the underspecified fallback for an
+// old or hand-edited file, not a state this tool chooses to write. Only when
+// there are fewer than two pools (nothing to split) are shares left off.
+function splitPayload() {
+  var copy = JSON.parse(JSON.stringify(draft));
+  copy.pools.forEach(function (p) { delete p._w; delete p._lock; });
+  if (draft.pools.length >= 2) {
+    var shares = roundShares(
+      draft.pools.map(function (p) { return p._w || 0; }),
+      draft.pools.map(function (p) { return !!p._lock; }));
+    copy.pools.forEach(function (p, i) { p.share = shares[i]; });
+  } else {
+    copy.pools.forEach(function (p) { delete p.share; });
+  }
+  return copy;
+}
+
+// jumpToSplit lands on the hashrate split rather than the top of the form, for
+// arriving from a gateway card's percentage. It runs after openModal because an
+// element in a hidden modal has no position to scroll to.
+async function openConfig(firstRun, jumpToSplit) {
   var msg = $("configMsg");
   msg.className = "msg";
   msg.textContent = "";
@@ -3922,19 +4791,25 @@ async function openConfig(firstRun) {
       + "start takes. Saving drops rig sessions briefly and resets every statistic.";
   draft.pools = draft.pools || [];
   draft.rigs = draft.rigs || [];
-  if (firstRun) {
-    if (!draft.pools.length) draft.pools.push({ name: "", addr: "" });
-    if (!draft.rigs.length) {
-      var listen = "";
-      try {
-        var sug = await fetch("/ports/suggest").then(function (r) { return r.json(); });
-        if (sug.ok) listen = sug.listen;
-      } catch (e) { /* blank is still usable */ }
-      draft.rigs.push({ name: "", listen: listen, user: "", pass: "x" });
-    }
-  }
+  // Lift any saved shares into the editor's working weights. No shares means an
+  // even split, which ensureWeights seeds. share is removed from the draft here
+  // and re-materialised only on save, so _w is the single source of truth while
+  // the modal is open.
+  draft.pools.forEach(function (p) {
+    if (typeof p.share === "number") p._w = p.share;
+    delete p.share;
+    p._lock = false;
+  });
+  // First run differs only in wording. Nothing is seeded: the form opens with
+  // its "No rigs yet" / "No pools yet" empty states and the Add buttons glowing,
+  // so the operator adds the first rig and pool themselves rather than finding
+  // blanks already filled in for them.
   renderConfigForm();
   openModal("configModal");
+  // Reset either way: the body keeps its scroll position while the modal is
+  // closed, so a plain open after a jump would otherwise land on the split too.
+  $("configBody").scrollTop = 0;
+  if (jumpToSplit && $("splitGroup")) $("splitGroup").scrollIntoView({ block: "start" });
 }
 
 $("configBtn").addEventListener("click", function () { openConfig(false); });
@@ -3954,7 +4829,7 @@ $("configSaveBtn").addEventListener("click", async function () {
     var res = await fetch("/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(draft)
+      body: JSON.stringify(splitPayload())
     });
     var out = await res.json();
     if (!res.ok) {
@@ -3989,6 +4864,23 @@ $("configSaveBtn").addEventListener("click", async function () {
 // title text cannot be styled, cannot be read at leisure, and is silently
 // truncated by some browsers.
 var HELP_TEXT = {
+  cfgSplit:
+    "<p>Every pool gets a share of the rotation over time. The default is an "
+    + "<b>even</b> split, and the split is written to config.json explicitly on "
+    + "save — even an even one — so the file always says exactly what it is "
+    + "doing. (A config with no shares is still accepted and means even.)</p>"
+    + "<p>Drag a handle or type a percent to weight a pool; the other unlocked "
+    + "pools rescale to keep their ratio to each other, so the total stays "
+    + "exactly 100 and you can shift one pool <b>without disturbing the balance "
+    + "among the rest</b>. From 25/25/25/25, pulling one pool to 70 leaves the "
+    + "other three at 10 each — still equal to one another.</p>"
+    + "<p><b>Lock</b> a pool to hold its value while you adjust the others; "
+    + "<b>Equalize</b> splits what is unlocked evenly. The solo slot is just "
+    + "another segment, so this is also where you set how much time is spent "
+    + "mining solo. Switchyard then steers the long-run split toward these "
+    + "shares regardless of block-timing luck. Shares carry two decimals and "
+    + "must total 100 — the bar guarantees that for you.</p>",
+
   motion:
     "<p>Rotation animations: the new link goes solid, a spark runs along it, "
     + "the arriving gateway flashes.</p>"
@@ -4003,6 +4895,15 @@ var HELP_TEXT = {
     + "<p>Off keeps every line plain green. Dot count and speed still follow "
     + "the hashrate either way; heat applies in every <b>flow</b> mode "
     + "except <b>even</b>.</p>",
+
+  chartView:
+    "<p>Which views the share of work chart shows.</p>"
+    + "<p><b>overall</b> puts every pool on one fixed scale, from zero to your "
+    + "total hashrate, to show where the work is going. Its ranges get very thin "
+    + "as time goes on.</p>"
+    + "<p><b>on target</b> zooms each pool to its own range, to show how closely "
+    + "it is holding its target.</p>"
+    + "<p><b>both</b> shows them side by side.</p>",
 
   flowMode:
     "<p>How the carrying links in the flow diagram show the work on them.</p>"
@@ -4116,14 +5017,24 @@ var HELP_TEXT = {
     + "to see.</p>",
 
   share:
-    "<p>Every pool should end up with an equal share of the work. This chart "
+    "<p>Every pool should end up with its target share of the work — an even "
+    + "split by default, or whatever you set under Hashrate split. This chart "
     + "shows how close each one currently is.</p>"
-    + "<p>The band is one standard deviation either side of an even split, and "
+    + "<p><b>Overall</b> keeps every pool on one scale, so bars can be compared. "
+    + "<b>On target</b> zooms each pool to its own range and is labelled in "
+    + "standard deviations (σ): its bars grow from the target, left for under "
+    + "and right for over, and the numbers on the right say what 1σ is worth "
+    + "for that pool. Bar lengths there cannot be compared between pools.</p>"
+    + OVERALL_RED_NOTE
+    + "<p>The band is one standard deviation either side of that target, and "
     + "its width comes from the number of <b>rotations</b>, not shares: a "
     + "rig\u2019s whole output for one dwell lands on one pool, so a dwell is one "
     + "draw.</p>"
     + "<p>It errs wide. Falling outside it is real evidence of a problem; "
-    + "sitting inside it is weaker evidence of fairness.</p>",
+    + "sitting inside it is weaker evidence of fairness.</p>"
+    + "<p>It appears with the first shares and swings a lot until several "
+    + "rotations have gone by. A very small target can read red for hours early "
+    + "on, because a single dwell is a large overshoot of it.</p>",
 
   sessions:
     "<p>One row per rig per gateway, including idle sessions.</p>"
@@ -4141,8 +5052,13 @@ var HELP_TEXT = {
     + "<span class=\"k\">netstat -ano</span> should match exactly.</p>",
 
   cfgRigListen:
-    "<p>The port to point this miner at. Switchyard assigns it from 23401 "
-    + "upwards and it does not change.</p>"
+    "<p>The port to point this miner at. Switchyard suggests the next free one "
+    + "from 23401 upwards; edit it to put this miner on a specific port — "
+    + "handy after reordering rigs leaves the ports out of sequence.</p>"
+    + "<p>A bare port listens on every interface; an "
+    + "<span class=\"k\">address:port</span> pins it to one. The value is "
+    + "checked as you type and again on save, where a clash with another "
+    + "listener is refused.</p>"
     + "<p>Configure the miner exactly as you would to reach the pool directly; "
     + "its worker name and password arrive on the connection and are forwarded "
     + "unchanged.</p>",
@@ -4193,8 +5109,9 @@ var HELP_TEXT = {
     + "accept and reject counts.</p>",
 
   cfgPortSuggest:
-    "<p>Ports are assigned automatically, starting at 23401 and skipping "
-    + "anything already in use on this machine.</p>",
+    "<p>A free port is suggested automatically, starting at 23401 and skipping "
+    + "anything already in use on this machine. You can override it per rig in "
+    + "the port field above.</p>",
 
   cfgPoolName:
     "<p>Read from the gateway\u2019s coinbase tag \u2014 what this pool calls "
@@ -4204,8 +5121,9 @@ var HELP_TEXT = {
     "<p><b>A solo gateway</b> is a DATUM gateway configured with no "
     + "<span class=\"k\">pool_host</span>. It joins the rotation like any "
     + "pool, and the time it gets is spent mining solo from your own node.</p>"
-    + "<p>One is supported. Weighting how much time it gets is not available "
-    + "yet; every slot gets an even share.</p>",
+    + "<p>Only one solo gateway is supported. To set how much time is spent "
+    + "mining solo, adjust its share in the <span class=\"k\">HASHRATE SPLIT</span> "
+    + "section below.</p>",
 };
 
 var helpPop = document.createElement("div");
